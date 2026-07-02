@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wraith"
+version = "0.1.0"
+description = "SSRF detection and out-of-band confirmation scanner for the bug-bounty cloud-metadata, protocol-smuggling, and MCP attack surface."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Bugsy Hewitt" }]
+keywords = ["ssrf", "security", "scanner", "cloud-metadata", "oob", "bug-bounty", "cwe-918", "offensive-security"]
+dependencies = [
+    "httpx>=0.27",
+    "h1-reporter @ git+https://github.com/bugsyhewitt/h1-reporter",
+    # TODO: scan-primitives @ git+https://github.com/bugsyhewitt/scan-primitives once built
+    #       (spec-only this pass -- provides the scope-enforced, rate-limited httpx
+    #        client every wraith request routes through; see V0.1-CRITERIA.md
+    #        "Shared infra" + "Suite conventions", and projects/scan-primitives/SPEC.md)
+]
+
+[project.optional-dependencies]
+# The hermetic test stack from V0.1-CRITERIA.md "Testability": respx (Tier-1
+# httpx mocking), pytest-httpserver (Tier-2 loopback servers), pytest-socket
+# (autouse egress lock on Tiers 0-2), dnslib (in-process OOB DNS listener).
+dev = [
+    "pytest>=7.0",
+    "respx",
+    "pytest-httpserver",
+    "pytest-socket",
+    "dnslib",
+]
+test = [
+    "pytest>=7.0",
+    "respx",
+    "pytest-httpserver",
+    "pytest-socket",
+    "dnslib",
+]
+
+[project.urls]
+Homepage = "https://github.com/bugsyhewitt/wraith"
+Repository = "https://github.com/bugsyhewitt/wraith"
+
+[project.scripts]
+wraith = "wraith.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "ship_gate: v0.1 release ship-gate (slow; runs build + fresh-venv install)",
+]
