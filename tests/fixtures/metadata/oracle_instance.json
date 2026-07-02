@@ -1,0 +1,7 @@
+{
+  "availabilityDomain": "Uocm:PHX-AD-1",
+  "compartmentId": "ocid1.compartment.oc1..example",
+  "id": "ocid1.instance.oc1.phx.example",
+  "region": "us-phoenix-1",
+  "shape": "VM.Standard2.1"
+}

@@ -18,12 +18,14 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** scaffolding pass. The package, finding model, output adapters
-> (SARIF 2.1.0 + HackerOne markdown), and CLI surface are in place and tested.
-> The SSRF detection/confirmation engine is the v0.1 build and is **not yet
-> implemented** -- every scan/recon/generate subcommand currently exits with
-> `NotImplementedError`. See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the
-> build contract and [`RESEARCH.md`](RESEARCH.md) for the niche brief.
+> **Status:** v0.1. The detection + confirmation engine is implemented and
+> tested: the filter-bypass mutator catalog, the cloud-metadata probes (incl.
+> the AWS IMDSv2 handshake), the OOB confirmation engine (local dnslib listener
+> + interactsh-compatible client), the `dict://` recon / `gopher://` generator,
+> and the version-gated MCP catalog. Every request routes through the shared
+> `scan-primitives` scope-enforced client. See
+> [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the build contract and
+> [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
 ## Ethical Use
 
@@ -50,10 +52,9 @@ For the hermetic test stack (respx, pytest-httpserver, pytest-socket, dnslib):
 pip install -e ".[dev]"
 ```
 
-> **Note:** wraith depends on `h1-reporter` (a git dependency) and, once built,
-> on the shared `scan-primitives` HTTP client. `scan-primitives` is spec-only at
-> this pass and is therefore a commented `# TODO` in `pyproject.toml`, not yet a
-> hard install requirement.
+> **Note:** wraith depends on the shared `scan-primitives` scope-enforced HTTP
+> client and `h1-reporter` (both git dependencies), plus `dnslib` (the local OOB
+> DNS listener) and `cryptography` (the interactsh-compatible OOB client).
 
 ## Scope file format
 
@@ -81,16 +82,18 @@ Pass it with `--scope-file scope.txt`.
 
 ## Usage
 
-wraith is organized into subcommands. **All subcommands are v0.1-pending in this
-scaffolding pass** -- the parser, flags, and help are wired and tested, but the
-handlers raise `NotImplementedError` until the detection engine lands.
+wraith is organized into subcommands: `scan` (detect + confirm), `dict`
+(read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.1.0   (works now)
-wraith --help             # subcommand overview (works now)
+wraith --version          # -> wraith 0.1.0
+wraith --help             # subcommand overview
 ```
 
-### `wraith scan` -- detect + confirm SSRF  *(v0.1-pending)*
+Scope is safety-critical and **required** for `scan` and `dict`: with no
+authorized entry wraith refuses to run (fail-closed).
+
+### `wraith scan` -- detect + confirm SSRF
 
 The core engine: run the filter-bypass mutator catalog against a marked
 injection point and confirm hits out-of-band.
@@ -116,7 +119,7 @@ wraith scan -r request.txt --param url --oob https://oob.example.net --mcp
 - `--mcp` &mdash; include the MCP / AI-infra SSRF detection catalog.
 - `--format {json,text,h1md,sarif}` &mdash; finding output format.
 
-### `wraith dict` -- dict:// read-only recon  *(v0.1-pending)*
+### `wraith dict` -- dict:// read-only recon
 
 Read-only `dict://` recon through an SSRF primitive: port/banner grab, Redis
 `INFO`, Memcached `stats`. Read-only by definition; no target state change.
@@ -125,16 +128,20 @@ Read-only `dict://` recon through an SSRF primitive: port/banner grab, Redis
 wraith dict -u "https://app.example.com/fetch?url=FUZZ" --scope-file scope.txt
 ```
 
-### `wraith gopher` -- gopher:// payload generator  *(v0.1-pending)*
+### `wraith gopher` -- gopher:// payload generator
 
 Generate a `gopher://` payload (RESP / FastCGI byte encoding, correct `%0d%0a`,
 single/double URL-encode toggle) and print it for the operator. **Dry-run only**
 in v0.1 -- it emits a payload, it never fires a weaponized sequence.
 
 ```bash
-wraith gopher --protocol redis           # emit a Redis RESP gopher payload
-wraith gopher --protocol fastcgi --double-encode
+wraith gopher --protocol redis --command "SET foo bar"   # Redis RESP payload
+wraith gopher --protocol redis --command "INFO" --host 10.0.0.5 --port 6379
+wraith gopher --protocol fastcgi --double-encode --script /var/www/html/index.php
 ```
+
+The output is a `gopher://` URL with correct `%0d%0a` CRLF encoding, printed for
+the operator to place into a confirmed SSRF primitive. wraith **never fires it**.
 
 ## Modules
 
@@ -143,14 +150,19 @@ wraith gopher --protocol fastcgi --double-encode
 | `wraith.findings` | The pinned suite `Finding` dataclass (lowercase severity, confidence, `cwe_id=918`, OOB proof). | implemented |
 | `wraith.sarif` | `to_sarif(findings) -> dict` &mdash; SARIF 2.1.0 export. | implemented |
 | `wraith.reporting` | `to_h1md(findings) -> str` &mdash; HackerOne markdown via `h1-reporter`. | implemented |
-| `wraith.client` | Scope-enforced HTTP boundary (backed by `scan-primitives`). | **stub** |
-| `wraith.cli` | argparse CLI: `scan` / `dict` / `gopher`. | surface only |
-| mutator engine, metadata probes, OOB engine, protocol modules, MCP catalog | The v0.1 detection/confirmation build. | **not built** |
+| `wraith.client` | Scope-enforced HTTP boundary (wired to `scan-primitives`). | implemented |
+| `wraith.mutators` | Filter-bypass variant catalog (IP encodings, `@`/`#`/`\`, CRLF, scheme, rebind). | implemented |
+| `wraith.metadata` | Cloud-metadata probes (AWS IMDSv1/IMDSv2, GCP, Azure, Alibaba, Oracle, DigitalOcean). | implemented |
+| `wraith.oob` | OOB confirmation: local dnslib+HTTP collaborator + interactsh-compatible client. | implemented |
+| `wraith.engine` | Scan orchestration: request-file parsing, injection, concurrent detect/confirm. | implemented |
+| `wraith.protocols` | `dict://` recon + `gopher://` payload generator (RESP / FastCGI). | implemented |
+| `wraith.mcp` | Version-gated MCP / AI-infra SSRF catalog (5 signatures). | implemented |
+| `wraith.cli` | argparse CLI: `scan` / `dict` / `gopher`. | implemented |
 
 ## Example output
 
-Once detection is built, a confirmed cloud-metadata SSRF renders to HackerOne
-markdown (`--format h1md`) roughly as:
+A confirmed cloud-metadata SSRF renders to HackerOne markdown (`--format h1md`)
+as:
 
 ```markdown
 # wraith SSRF findings
@@ -170,9 +182,7 @@ Confirmed out-of-band -- the server initiated a callback to the wraith canary.
 ```
 
 The same finding exports to SARIF 2.1.0 via `--format sarif` for GitHub Code
-Scanning / IDE ingestion. The `Finding` -> SARIF and `Finding` -> h1md adapters
-are implemented and unit-tested now (`tests/test_findings.py`); only the code
-that *produces* findings from a live scan is pending.
+Scanning / IDE ingestion, and to JSON via `--format json`.
 
 ## Development
 

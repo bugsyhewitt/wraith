@@ -1,51 +1,56 @@
-"""wraith HTTP client boundary.
+"""wraith HTTP client boundary -- wired to the ``scan-primitives`` shared lib.
 
-Backed by the ``scan-primitives`` shared lib once built (scope-enforced,
-rate-limited httpx wrapper). STUB for scaffolding -- no network this pass.
-R5: fetched content is untrusted data, never eval'd.
+Every outbound request wraith makes routes through
+:class:`scan_primitives.ScanClient`, which enforces the engagement **scope
+before any socket is opened** (the cardinal guard for authorized testing),
+applies a shared token-bucket rate limit, and can route through a proxy
+(Caido/Burp). wraith owns **no** HTTP plumbing of its own -- this module is the
+thin factory + typing boundary over the shared client.
 
--------------------------------------------------------------------------------
+Wiring status: scan-primitives is now a real, installed dependency (see
+``pyproject.toml``). :func:`get_client` constructs a live
+:class:`scan_primitives.ScanClient`; :func:`build_scope` parses a scope file
+and/or explicit entries into a :class:`scan_primitives.Scope`.
 
-Every outbound request wraith makes MUST route through this boundary so that a
-single audited implementation enforces scope, rate limits, and proxy routing
-(V0.1-CRITERIA.md #8 "Output" + "Safety"). wraith deliberately owns **no** HTTP
-plumbing of its own: the concrete client is ``scan_primitives.ScanClient`` (an
-async ``httpx`` wrapper) once that library ships. Until then this module only
-declares the *shape* wraith depends on -- the :class:`ScanClient` /
-:class:`Response` protocols -- and a placeholder that refuses to run.
+Safety rails inherited from the shared client:
 
-Wiring status (this pass):
-    * scan-primitives is spec-only (see projects/scan-primitives/SPEC.md); it is
-      NOT yet an install dependency (see the ``# TODO`` line in pyproject.toml).
-    * :class:`StubScanClient` raises :class:`NotImplementedError` on construction
-      so no code path can accidentally open a socket before scope enforcement
-      exists. The real client lands with V0.1-CRITERIA.md #8.
-
-Safety rails encoded in the protocol below:
-    * **Scope first.** The real client raises before opening a socket if the
-      target is out of scope (the cardinal-sin guard for authorized testing).
-    * **R5 -- untrusted response bytes.** :attr:`Response.content` /
-      :attr:`Response.text` are *data*. wraith never passes them to ``eval``,
-      ``exec``, a shell, or an LLM call with elevated permissions. They are
-      pattern-matched for response signatures and captured into a
-      :class:`wraith.findings.Finding` evidence dict -- nothing more.
+* **Scope first.** ``scope.assert_in_scope(url)`` runs before the socket opens;
+  an out-of-scope target raises :class:`OutOfScopeError` and NO traffic leaves.
+* **R5 -- untrusted response bytes.** :attr:`Response.content` / ``.text`` are
+  *data*. wraith signature-matches them and captures them as
+  :class:`wraith.findings.Finding` evidence -- never ``eval`` / ``exec``, never a
+  shell, never an LLM tool call.
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol, runtime_checkable
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 
-# Raised by every not-yet-built code path; cites the contract so the reviewer
-# and any future Worker land on the exact criteria section.
-_NOT_BUILT = "v0.1 build -- scan-primitives integration; see V0.1-CRITERIA.md #8 'Output'"
+import httpx
+from scan_primitives import OutOfScopeError, Scope, ScanClient, load_scope
+
+__all__ = [
+    "OutOfScopeError",
+    "Response",
+    "Scope",
+    "ScanClient",
+    "build_scope",
+    "get_client",
+    "load_scope",
+]
 
 
 @runtime_checkable
 class Response(Protocol):
     """The minimal response shape wraith reads from the shared client.
 
-    R5: ``content`` / ``text`` are untrusted response bytes. Treat them as data
-    only -- signature-match and capture-as-evidence, never evaluate.
+    Structurally satisfied by :class:`httpx.Response` (what
+    ``scan_primitives.ScanClient`` returns). Kept as a Protocol so tests can pass
+    lightweight fakes and so wraith never depends on more of httpx than it reads.
+
+    R5: ``content`` / ``text`` are untrusted response bytes -- signature-match
+    and capture-as-evidence only, never evaluate.
     """
 
     status_code: int
@@ -58,42 +63,51 @@ class Response(Protocol):
     def text(self) -> str: ...
 
 
-@runtime_checkable
-class ScanClient(Protocol):
-    """The scope-enforced async HTTP boundary wraith targets.
+def build_scope(
+    scope_file: str | Path | None = None,
+    entries: Iterable[str] | None = None,
+) -> Scope:
+    """Build a :class:`Scope` from a scope file and/or explicit entries.
 
-    Implemented by ``scan_primitives.ScanClient`` once that lib is built. The
-    contract: every call asserts the target is in scope **before** any socket is
-    opened, applies the shared token-bucket rate limit, honours the configured
-    proxy, and records the request for finding evidence.
+    * ``scope_file`` only -> :func:`scan_primitives.load_scope`.
+    * ``entries`` (with or without a file) -> merged and parsed via
+      :meth:`Scope.from_entries` (``#`` comments and blanks are ignored there).
+
+    A scope with no valid entries is fail-closed: it denies every target. wraith
+    therefore refuses to scan without at least one authorized entry (the CLI
+    enforces this and surfaces a clear error rather than silently doing nothing).
     """
+    if scope_file is not None and not entries:
+        return load_scope(scope_file)
 
-    async def request(
-        self, method: str, url: str, **kwargs: Any
-    ) -> Response: ...
+    lines: list[str] = []
+    if scope_file is not None:
+        lines.extend(Path(scope_file).read_text(encoding="utf-8").splitlines())
+    if entries:
+        lines.extend(str(e) for e in entries)
+    return Scope.from_entries(lines)
 
-    async def get(self, url: str, **kwargs: Any) -> Response: ...
 
-    async def aclose(self) -> None: ...
+def get_client(
+    scope: Scope,
+    *,
+    rate_limit: float | None = None,
+    proxy: str | None = None,
+    timeout: float = 10.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+    **client_kwargs: Any,
+) -> ScanClient:
+    """Construct the shared scope-enforced async client for wraith.
 
-
-class StubScanClient:
-    """Placeholder client for the scaffolding pass -- refuses to run.
-
-    Instantiating (or calling) this raises :class:`NotImplementedError`. It
-    exists so the client boundary is importable and type-checkable now, while
-    guaranteeing no request is emitted before ``scan-primitives`` provides real,
-    scope-enforced networking.
+    Thin wrapper over :class:`scan_primitives.ScanClient` so wraith has a single
+    construction site (and a single place to pin suite-wide client defaults).
+    ``transport`` lets tests inject an ``httpx.MockTransport`` / respx router.
     """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError(_NOT_BUILT)
-
-
-def get_client(*args: Any, **kwargs: Any) -> ScanClient:
-    """Return the shared scan client. STUB -- raises until scan-primitives lands.
-
-    The real factory will construct a ``scan_primitives.ScanClient`` from a parsed
-    scope, an optional rate limit, and an optional proxy (V0.1-CRITERIA.md #8).
-    """
-    raise NotImplementedError(_NOT_BUILT)
+    return ScanClient(
+        scope,
+        rate_limit=rate_limit,
+        proxy=proxy,
+        timeout=timeout,
+        transport=transport,
+        **client_kwargs,
+    )

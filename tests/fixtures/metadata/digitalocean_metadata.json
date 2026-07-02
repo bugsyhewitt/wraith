@@ -1,0 +1,8 @@
+{
+  "droplet_id": 2756294,
+  "hostname": "example-droplet",
+  "region": "nyc3",
+  "interfaces": {
+    "public": [{"ipv4": {"ip_address": "203.0.113.10"}}]
+  }
+}

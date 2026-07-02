@@ -16,14 +16,15 @@ subcommands mirroring the V0.1-CRITERIA.md capability groups:
                (weaponization is deferred to v0.2 behind --exploit; see the
                "Explicitly NOT in v0.1" list).
 
-This is the SCAFFOLDING pass: the parser, flags, help text, and --version are
-wired and tested, but every subcommand handler raises NotImplementedError -- the
-SSRF mutator engine, metadata probes, OOB engine, and protocol modules are the
-v0.1 build, not this pass.]
+The handlers are wired to the v0.1 engine: ``scan`` runs the mutator engine +
+cloud-metadata probes + OOB confirmation (+ the MCP catalog with ``--mcp``);
+``dict`` runs read-only dict:// recon; ``gopher`` emits a dry-run payload. Heavy
+modules are imported lazily inside each handler so ``--version`` / ``--help``
+stay fast and dependency-light.]
 
 Exit codes:
-    0  a handler completed (no handler completes yet this pass)
-    2  usage / argument error, or no subcommand given (argparse default)
+    0  a handler completed (with or without findings)
+    2  usage / argument error, missing/empty scope, or no subcommand given
 """
 
 from __future__ import annotations
@@ -32,11 +33,6 @@ import argparse
 from typing import Sequence
 
 from wraith import __version__
-
-# Every handler raises this until the v0.1 detection/confirmation engine is
-# built. The message points back at the contract so the next Worker (and the
-# reviewing Team Lead) land on the right section.
-_NOT_BUILT = "v0.1 build -- see V0.1-CRITERIA.md"
 
 
 def _add_target_group(sub: argparse.ArgumentParser) -> None:
@@ -110,8 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Run the SSRF filter-bypass mutator engine against a marked "
             "injection point and confirm hits out-of-band. Emits suite-standard "
-            "findings. [scaffold: not yet implemented -- see V0.1-CRITERIA.md "
-            "#2-#4, #6]"
+            "findings (see V0.1-CRITERIA.md #2-#4, #6)."
         ),
     )
     _add_target_group(scan)
@@ -152,6 +147,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="output_format",
         help="output format for findings (default: json)",
     )
+    scan.add_argument(
+        "--rate-limit",
+        type=float,
+        dest="rate_limit",
+        metavar="RPS",
+        help="max requests/second (shared token bucket; default: unlimited)",
+    )
+    scan.add_argument(
+        "--proxy",
+        metavar="URL",
+        help="route traffic through an http/https/socks proxy (Caido/Burp)",
+    )
     scan.set_defaults(handler=_cmd_scan)
 
     # -- dict: read-only recon -------------------------------------------------
@@ -160,12 +167,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="dict:// read-only recon (port/banner, Redis INFO, Memcached stats)",
         description=(
             "Read-only dict:// recon through an SSRF primitive. Read-only by "
-            "definition -- no state change. [scaffold: not yet implemented -- "
-            "see V0.1-CRITERIA.md #5]"
+            "definition -- no state change (see V0.1-CRITERIA.md #5)."
         ),
     )
     dict_cmd.add_argument(
         "-u", "--target", required=True, metavar="URL", help="target URL to probe"
+    )
+    dict_cmd.add_argument(
+        "--marker",
+        metavar="STR",
+        default="FUZZ",
+        help="injection marker replaced by each dict:// recon payload (default: FUZZ)",
+    )
+    dict_cmd.add_argument(
+        "--param",
+        metavar="NAME",
+        help="mark the injection point by query-param name (instead of --marker)",
+    )
+    dict_cmd.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="internal host to recon through the SSRF (default: 127.0.0.1)",
     )
     dict_cmd.add_argument(
         "--scope-file",
@@ -183,8 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Generate a gopher:// payload (RESP / FastCGI byte encoding, correct "
             "CRLF %0d%0a, single/double URL-encode toggle) and print it for the "
             "operator. DRY-RUN ONLY in v0.1 -- weaponized firing is deferred to "
-            "v0.2 behind --exploit. [scaffold: not yet implemented -- see "
-            "V0.1-CRITERIA.md #5]"
+            "v0.2 behind --exploit (see V0.1-CRITERIA.md #5)."
         ),
     )
     gopher.add_argument(
@@ -206,25 +227,192 @@ def build_parser() -> argparse.ArgumentParser:
         dest="double_encode",
         help="URL-encode the payload twice (single-encode is the default)",
     )
+    gopher.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="target host embedded in the gopher URL (default: 127.0.0.1)",
+    )
+    gopher.add_argument(
+        "--port",
+        type=int,
+        help="target port (default: 6379 for redis, 9000 for fastcgi)",
+    )
+    gopher.add_argument(
+        "--command",
+        action="append",
+        dest="commands",
+        metavar="CMD",
+        help="redis: a command to encode, repeatable (default: 'INFO'), e.g. --command 'SET k v'",
+    )
+    gopher.add_argument(
+        "--script",
+        default="/var/www/html/index.php",
+        help="fastcgi: SCRIPT_FILENAME to encode (default: /var/www/html/index.php)",
+    )
     gopher.set_defaults(handler=_cmd_gopher)
 
     return parser
 
 
+def _load_scope_or_exit(scope_file: str | None):
+    """Return a Scope from ``scope_file`` or a (message, exit-code) on failure.
+
+    Scope is safety-critical: a scan with no authorized scope is refused
+    (fail-closed) so wraith cannot touch an out-of-scope target.
+    """
+    import sys
+
+    from wraith.client import build_scope
+
+    if not scope_file:
+        print(
+            "error: --scope-file is required (scope is enforced before any request)",
+            file=sys.stderr,
+        )
+        return None
+    scope = build_scope(scope_file=scope_file)
+    if len(scope) == 0:
+        print(
+            "error: scope file has no valid entries; refusing to scan (fail-closed)",
+            file=sys.stderr,
+        )
+        return None
+    return scope
+
+
+def _emit(findings, fmt: str) -> None:
+    """Render findings to stdout in the requested format."""
+    import json
+
+    from wraith.reporting import to_h1md
+    from wraith.sarif import to_sarif
+
+    if fmt == "json":
+        print(json.dumps([f.to_dict() for f in findings], indent=2))
+    elif fmt == "sarif":
+        print(json.dumps(to_sarif(findings), indent=2))
+    elif fmt == "h1md":
+        print(to_h1md(findings))
+    else:  # text
+        if not findings:
+            print("no findings")
+        for f in findings:
+            state = "CONFIRMED" if f.oob_proof else "detected"
+            print(
+                f"[{f.severity.upper()}] {f.title} ({state}) "
+                f"variant={f.variant} target={f.target}"
+            )
+            if f.oob_proof:
+                print(f"    oob-proof: {f.oob_proof}")
+
+
+def _build_collaborator(oob_url: str | None):
+    if not oob_url:
+        return None
+    from wraith.oob import InteractshClient, InteractshConfig
+
+    return InteractshClient(InteractshConfig(server=oob_url))
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
-    # criteria #1-#4, #6: mutator engine, metadata probes, OOB confirmation,
-    # MCP catalog. Not built this pass.
-    raise NotImplementedError(_NOT_BUILT)
+    """Detect + confirm SSRF (criteria #1-#4, #6)."""
+    import asyncio
+    import sys
+    from urllib.parse import urlsplit
+
+    from wraith.engine import Target, run_scan
+    from wraith.mcp import scan_mcp
+
+    if not args.target and not args.request_file:
+        print("error: one of -u/--target or -r/--request-file is required", file=sys.stderr)
+        return 2
+    scope = _load_scope_or_exit(args.scope_file)
+    if scope is None:
+        return 2
+
+    if args.request_file:
+        target = Target.from_request_file(
+            args.request_file, marker=args.marker, param=args.param
+        )
+    else:
+        target = Target.from_url(args.target, marker=args.marker, param=args.param)
+
+    collaborator = _build_collaborator(args.oob)
+    try:
+        if args.mcp:
+            parts = urlsplit(target.url)
+            base = f"{parts.scheme}://{parts.netloc}"
+            findings = asyncio.run(
+                scan_mcp(
+                    base,
+                    scope,
+                    collaborator=collaborator,
+                    cloud_metadata=args.cloud_metadata,
+                    concurrency=args.concurrency,
+                )
+            )
+        else:
+            findings = asyncio.run(
+                run_scan(
+                    target,
+                    scope,
+                    rate_limit=args.rate_limit,
+                    proxy=args.proxy,
+                    concurrency=args.concurrency,
+                    cloud_metadata=args.cloud_metadata,
+                    collaborator=collaborator,
+                )
+            )
+    finally:
+        if collaborator is not None:
+            collaborator.close()
+
+    _emit(findings, args.output_format)
+    return 0
 
 
 def _cmd_dict(args: argparse.Namespace) -> int:
-    # criteria #5: dict:// read-only recon. Not built this pass.
-    raise NotImplementedError(_NOT_BUILT)
+    """dict:// read-only recon through an SSRF injection point (criteria #5)."""
+    import asyncio
+
+    from wraith.engine import Target
+    from wraith.protocols import dict_recon
+
+    scope = _load_scope_or_exit(args.scope_file)
+    if scope is None:
+        return 2
+
+    target = Target.from_url(args.target, marker=args.marker, param=args.param)
+    findings = asyncio.run(dict_recon(target, scope, host=args.host))
+    _emit(findings, "text")
+    return 0
 
 
 def _cmd_gopher(args: argparse.Namespace) -> int:
-    # criteria #5: gopher:// payload generator (dry-run). Not built this pass.
-    raise NotImplementedError(_NOT_BUILT)
+    """gopher:// payload generator -- DRY-RUN only (criteria #5)."""
+    from wraith.protocols import fastcgi_encode, gopher_payload, resp_encode
+
+    if args.protocol == "redis":
+        port = args.port or 6379
+        commands = [c.split() for c in (args.commands or ["INFO"])]
+        data = resp_encode(commands)
+    else:  # fastcgi
+        port = args.port or 9000
+        data = fastcgi_encode(
+            {
+                "SCRIPT_FILENAME": args.script,
+                "REQUEST_METHOD": "GET",
+                "GATEWAY_INTERFACE": "CGI/1.1",
+            }
+        )
+    payload = gopher_payload(args.host, port, data, double_encode=args.double_encode)
+    print("# wraith gopher payload -- DRY-RUN (emitted for the operator, never fired)")
+    print(
+        f"# protocol={args.protocol} host={args.host} port={port} "
+        f"double_encode={args.double_encode}"
+    )
+    print(payload)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

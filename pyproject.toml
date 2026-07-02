@@ -14,10 +14,13 @@ keywords = ["ssrf", "security", "scanner", "cloud-metadata", "oob", "bug-bounty"
 dependencies = [
     "httpx>=0.27",
     "h1-reporter @ git+https://github.com/bugsyhewitt/h1-reporter",
-    # TODO: scan-primitives @ git+https://github.com/bugsyhewitt/scan-primitives once built
-    #       (spec-only this pass -- provides the scope-enforced, rate-limited httpx
-    #        client every wraith request routes through; see V0.1-CRITERIA.md
-    #        "Shared infra" + "Suite conventions", and projects/scan-primitives/SPEC.md)
+    # The scope-enforced, rate-limited httpx client every wraith request routes
+    # through (V0.1-CRITERIA.md "Shared infra" + "Suite conventions").
+    "scan-primitives @ git+https://github.com/bugsyhewitt/scan-primitives",
+    # dnslib: in-process DNS listener for the self-hosted OOB collaborator (#4).
+    "dnslib>=0.9",
+    # cryptography: interactsh-compatible OOB client crypto (RSA-OAEP + AES-CFB, #4).
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +33,8 @@ dev = [
     "pytest-httpserver",
     "pytest-socket",
     "dnslib",
+    "cryptography>=42",
+    "build>=1.0",
 ]
 test = [
     "pytest>=7.0",
@@ -37,6 +42,8 @@ test = [
     "pytest-httpserver",
     "pytest-socket",
     "dnslib",
+    "cryptography>=42",
+    "build>=1.0",
 ]
 
 [project.urls]

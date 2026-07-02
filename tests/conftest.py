@@ -29,15 +29,21 @@ except ImportError:  # pragma: no cover - exercised only on a bare install
 
 @pytest.fixture(autouse=True)
 def _egress_lock(request: pytest.FixtureRequest):
-    """Disable real sockets on the unit tier (criteria: enforce no egress).
+    """Loopback-only sockets on the unit tier (criteria: enforce no real egress).
 
-    ship_gate tests build/install in subprocesses and are exempt. Unix sockets
-    stay allowed so subprocess/IPC machinery is unaffected.
+    Mirrors ``pytest-socket --disable-socket --allow-hosts=127.0.0.1``: sockets
+    to ``127.0.0.1`` / ``::1`` are permitted so the Tier-2 loopback fixtures (the
+    in-process dnslib OOB listener + pytest-httpserver) work, while any accidental
+    request to a real host fails loudly. Tier-0/1 tests open no socket at all
+    (respx intercepts before the transport). ship_gate tests build/install in
+    subprocesses and are exempt.
     """
     if request.node.get_closest_marker("ship_gate") or not _HAVE_PYTEST_SOCKET:
         yield
         return
-    pytest_socket.disable_socket(allow_unix_socket=True)
+    pytest_socket.socket_allow_hosts(
+        ["127.0.0.1", "::1"], allow_unix_socket=True
+    )
     try:
         yield
     finally:
