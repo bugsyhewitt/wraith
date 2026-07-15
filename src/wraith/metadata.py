@@ -46,6 +46,8 @@ __all__ = [
     "MetadataProbe",
     "CATALOG",
     "AWS_IMDS_BASE",
+    "AZURE_MI_PATH",
+    "AZURE_MI_QUERY",
     "TOKEN_TTL_HEADER",
     "TOKEN_HEADER",
     "imdsv2_token",
@@ -61,6 +63,10 @@ TOKEN_PATH = "/latest/api/token"
 TOKEN_TTL_HEADER = "X-aws-ec2-metadata-token-ttl-seconds"
 TOKEN_HEADER = "X-aws-ec2-metadata-token"
 DEFAULT_TOKEN_TTL = 21600
+
+# Azure managed identity (IMDS credential endpoint) constants.
+AZURE_MI_PATH = "/metadata/identity/oauth2/token"
+AZURE_MI_QUERY = "api-version=2018-02-01&resource=https://management.azure.com/"
 
 _CWE_REF = "https://cwe.mitre.org/data/definitions/918.html"
 
@@ -136,6 +142,32 @@ CATALOG: list[MetadataProbe] = [
             "https://learn.microsoft.com/azure/virtual-machines/instance-metadata-service",
         ),
     ),
+    # Azure managed identity: IMDS credential endpoint. Returns an OAuth2
+    # access_token for the VM's managed identity — critical severity because
+    # it is a harvested credential, not just identity metadata. The
+    # ``resource`` field in the response is the key differentiator from GCP
+    # tokens (which also carry ``access_token``/``token_type``/``expires_in``
+    # but never ``resource``). Must appear before GCP in the via-SSRF
+    # classifier dict (``_RESPONSE_SIGNATURES``) for this reason.
+    MetadataProbe(
+        provider="azure-managed-identity",
+        name="azure-managed-identity-token",
+        base="http://169.254.169.254",
+        path=AZURE_MI_PATH,
+        query=AZURE_MI_QUERY,
+        headers={"Metadata": "true"},
+        forbid_headers=("X-Forwarded-For",),
+        # ``resource`` is ABSENT from GCP token responses — it is the
+        # primary discriminator. ``access_token`` and ``token_type``
+        # confirm this is a credential endpoint, not mere identity.
+        signatures=("access_token", "resource", "token_type"),
+        min_hits=2,
+        severity="critical",
+        references=(
+            _CWE_REF,
+            "https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token",
+        ),
+    ),
     MetadataProbe(
         provider="oracle",
         name="oracle-instance-metadata",
@@ -190,6 +222,14 @@ _SECRET_MARKERS = (
 )
 
 
+# Human-readable labels for provider keys that contain hyphens or need
+# a title that differs from the default ``"<PROVIDER> instance-metadata"``
+# format. Extend this dict when adding new non-standard provider keys.
+_TITLE_LABELS: dict[str, str] = {
+    "azure-managed-identity": "Azure managed-identity credential",
+}
+
+
 def _finding_id(*parts: str) -> str:
     digest = hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
     return f"wraith-{digest}"
@@ -220,7 +260,8 @@ def _make_finding(
     request_summary: str,
     oob_proof: str | None = None,
 ) -> Finding:
-    title = f"SSRF to {provider.upper()} instance-metadata endpoint"
+    label = _TITLE_LABELS.get(provider, f"{provider.upper()} instance-metadata")
+    title = f"SSRF to {label} endpoint"
     return Finding(
         id=_finding_id(provider, url, variant),
         tool="wraith",
@@ -445,6 +486,11 @@ _RESPONSE_SIGNATURES: dict[str, tuple[tuple[str, ...], int, str]] = {
     # an Alibaba body (which also carries AccessKeyId) is not misread as AWS.
     "alibaba": (_ALIBABA_CRED_SIGS, 2, "critical"),
     "aws": (_AWS_CRED_SIGS, 2, "critical"),
+    # azure-managed-identity MUST precede gcp: both responses carry
+    # "access_token" / "token_type" / "expires_in", but Azure managed-identity
+    # responses also carry "resource" whereas GCP responses do not. Checking
+    # "resource" first prevents Azure MI tokens from being misclassified as GCP.
+    "azure-managed-identity": (("access_token", "resource"), 2, "critical"),
     "gcp": (("access_token", "token_type", "expires_in"), 2, "critical"),
     "azure": (("vmId", "subscriptionId", "resourceGroupName", "azEnvironment"), 2, "high"),
     "oracle": (("availabilityDomain", "compartmentId", "region"), 2, "high"),

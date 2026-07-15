@@ -276,6 +276,7 @@ def test_out_of_scope_metadata_base_is_skipped_not_raised():
         ("aws_iam_credentials.json", "aws", "critical"),
         ("gcp_token.json", "gcp", "critical"),
         ("azure_instance.json", "azure", "high"),
+        ("azure_managed_identity.json", "azure-managed-identity", "critical"),
         ("alibaba_ram_credentials.json", "alibaba", "critical"),
         ("oracle_instance.json", "oracle", "high"),
         ("digitalocean_metadata.json", "digitalocean", "high"),
@@ -329,3 +330,126 @@ def test_hetzner_probe_no_finding_on_miss():
 
 def test_detect_from_response_none_for_benign_body():
     assert detect_from_response('{"status":"ok","items":[]}') is None
+
+
+# --------------------------------------------------------------------------- #
+# Azure managed identity: credential endpoint (v0.9.2)
+# --------------------------------------------------------------------------- #
+
+def test_azure_managed_identity_probe_sends_metadata_header_and_omits_xff():
+    """Direct probe: Metadata:true must be present; X-Forwarded-For must be absent."""
+    azure_mi = (_FIXTURES / "azure_managed_identity.json").read_text()
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get(
+            host="169.254.169.254",
+            path="/metadata/identity/oauth2/token",
+        ).mock(return_value=httpx.Response(200, text=azure_mi))
+
+        async def go():
+            async with get_client(_scope()) as client:
+                return await _probe_simple(client, _catalog_probe("azure-managed-identity"))
+
+        finding = _run(go())
+
+    req = route.calls.last.request
+    assert req.headers.get("Metadata") == "true", "Metadata:true header required for Azure IMDS"
+    assert "x-forwarded-for" not in req.headers, "X-Forwarded-For must be absent (Azure IMDS rejects it)"
+    assert "api-version=" in str(req.url)
+    assert finding is not None
+
+
+def test_azure_managed_identity_probe_is_critical_severity():
+    """Direct probe: managed identity token response must produce a critical finding."""
+    azure_mi = (_FIXTURES / "azure_managed_identity.json").read_text()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(
+            host="169.254.169.254",
+            path="/metadata/identity/oauth2/token",
+        ).mock(return_value=httpx.Response(200, text=azure_mi))
+
+        async def go():
+            async with get_client(_scope()) as client:
+                return await _probe_simple(client, _catalog_probe("azure-managed-identity"))
+
+        finding = _run(go())
+
+    assert finding is not None
+    assert finding.severity == "critical", "managed identity token is a harvested credential → critical"
+    assert finding.cwe_id == 918
+    assert finding.evidence.get("provider") == "azure-managed-identity"
+
+
+def test_azure_managed_identity_finding_title_is_human_readable():
+    """Finding title should mention 'Azure managed-identity', not 'AZURE-MANAGED-IDENTITY'."""
+    azure_mi = (_FIXTURES / "azure_managed_identity.json").read_text()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(
+            host="169.254.169.254",
+            path="/metadata/identity/oauth2/token",
+        ).mock(return_value=httpx.Response(200, text=azure_mi))
+
+        async def go():
+            async with get_client(_scope()) as client:
+                return await _probe_simple(client, _catalog_probe("azure-managed-identity"))
+
+        finding = _run(go())
+
+    assert finding is not None
+    # Should not contain the raw hyphenated provider key uppercased.
+    assert "AZURE-MANAGED-IDENTITY" not in finding.title
+    assert "managed-identity" in finding.title.lower()
+
+
+def test_azure_managed_identity_classifier_not_confused_with_gcp():
+    """A GCP token response must NOT be classified as azure-managed-identity.
+
+    GCP tokens have access_token/token_type/expires_in but NO ``resource`` field.
+    The classifier must distinguish them: azure-managed-identity requires ``resource``,
+    GCP requires token_type+expires_in. Both should classify correctly.
+    """
+    gcp = (_FIXTURES / "gcp_token.json").read_text()
+    azure_mi = (_FIXTURES / "azure_managed_identity.json").read_text()
+
+    # GCP token: must classify as "gcp", not "azure-managed-identity".
+    result = detect_from_response(gcp)
+    assert result is not None
+    provider, _, _ = result
+    assert provider == "gcp", f"GCP token must classify as gcp, got {provider!r}"
+
+    # Azure MI token: must classify as "azure-managed-identity", not "gcp".
+    result = detect_from_response(azure_mi)
+    assert result is not None
+    provider, _, severity = result
+    assert provider == "azure-managed-identity", (
+        f"Azure MI token must classify as azure-managed-identity, got {provider!r}"
+    )
+    assert severity == "critical"
+
+
+def test_azure_managed_identity_probe_no_finding_on_miss():
+    """A non-credential response at the endpoint produces no finding."""
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(
+            host="169.254.169.254",
+            path="/metadata/identity/oauth2/token",
+        ).mock(return_value=httpx.Response(400, text='{"error":"invalid_request"}'))
+
+        async def go():
+            async with get_client(_scope()) as client:
+                return await _probe_simple(client, _catalog_probe("azure-managed-identity"))
+
+        assert _run(go()) is None
+
+
+def test_azure_managed_identity_in_metadata_ssrf_urls():
+    """Azure managed identity URL must be present in the via-SSRF injection list."""
+    from wraith.engine import METADATA_SSRF_URLS
+
+    labels = [label for label, _url in METADATA_SSRF_URLS]
+    assert "azure-managed-identity" in labels, (
+        "azure-managed-identity must be in METADATA_SSRF_URLS for via-SSRF injection"
+    )
+    # Verify the URL points to the credential endpoint, not the instance endpoint.
+    mi_url = next(url for label, url in METADATA_SSRF_URLS if label == "azure-managed-identity")
+    assert "identity/oauth2/token" in mi_url
+    assert "api-version=" in mi_url

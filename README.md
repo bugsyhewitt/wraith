@@ -18,7 +18,7 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.9.1. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.9.2. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
@@ -54,7 +54,20 @@ concern (see [Roadmap](#roadmap)).
 > redirect to the internal host. The three variants cover redirectors that pass
 > the destination verbatim, decode once, or decode twice (WAF double-encoding
 > bypass). The redirect-chain family is the highest-priority bypass class and
-> appears first in the mutator ordering.
+> appears first in the mutator ordering. v0.9.2 adds **Azure managed-identity
+> credential endpoint** coverage: a second Azure IMDS probe at
+> `169.254.169.254/metadata/identity/oauth2/token` (the managed-identity OAuth2
+> token endpoint). This endpoint returns an actual `access_token` for the VM's
+> assigned managed identity and is distinct from the existing Azure instance
+> metadata probe (`/metadata/instance`, which returns only identity data at
+> `high` severity). The managed-identity token is a harvested credential →
+> `critical` severity. Both the direct-probe catalog (`wraith.metadata.CATALOG`)
+> and the via-SSRF injection list (`engine.METADATA_SSRF_URLS`) include the new
+> endpoint. The via-SSRF response classifier (`detect_from_response`) checks
+> `azure-managed-identity` before `gcp` to prevent Azure MI tokens (which also
+> carry `access_token`/`token_type`/`expires_in`) from being misclassified as GCP;
+> the disambiguator is the `resource` field present in Azure MI responses and
+> absent from GCP tokens.
 > See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
 > [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
@@ -117,7 +130,7 @@ wraith is organized into subcommands: `scan` (detect + confirm), `dict`
 (read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.9.1
+wraith --version          # -> wraith 0.9.2
 wraith --help             # subcommand overview
 ```
 
@@ -385,7 +398,7 @@ prompt exists to prevent accidental use.
 | `wraith.reporting` | `to_h1md(findings) -> str` &mdash; HackerOne markdown via `h1-reporter`. | implemented |
 | `wraith.client` | Scope-enforced HTTP boundary (wired to `scan-primitives`). | implemented |
 | `wraith.mutators` | Filter-bypass variant catalog (IP encodings, `@`/`#`/`\`, CRLF, scheme, rebind, open-redirect chaining). | implemented |
-| `wraith.metadata` | Cloud-metadata probes (AWS IMDSv1/IMDSv2, GCP, Azure, Alibaba, Oracle, DigitalOcean). | implemented |
+| `wraith.metadata` | Cloud-metadata probes (AWS IMDSv1/IMDSv2, GCP, Azure instance + managed-identity, Alibaba, Oracle, DigitalOcean, Hetzner). | implemented |
 | `wraith.oob` | OOB confirmation: local dnslib+HTTP collaborator + interactsh-compatible client. | implemented |
 | `wraith.engine` | Scan orchestration: request-file parsing, injection, concurrent detect/confirm. | implemented |
 | `wraith.protocols` | `dict://` recon + `gopher://` payload generator (RESP / FastCGI) + `ldap://` / `tftp://` / `file://` scheme probes. | implemented |
@@ -468,7 +481,14 @@ deduplicating findings before emitting the combined result. Blank lines and `#`
 comments are ignored. Cannot be combined with `-r/--request-file`. v0.9.1 adds
 **`--timeout` for `wraith scan`**: expose the per-request timeout (previously
 hardcoded at 10 s) so operators can tune it upward for slow internal targets or
-downward for fast infrastructure.
+downward for fast infrastructure. v0.9.2 adds **Azure managed-identity
+credential endpoint**: the IMDS credential probe at
+`169.254.169.254/metadata/identity/oauth2/token` is now in both the direct
+probe catalog and the via-SSRF injection list; finding severity is `critical`
+(harvested OAuth2 access_token, not mere identity metadata). The via-SSRF
+classifier checks `azure-managed-identity` before `gcp` to prevent token
+response misclassification (both return `access_token`; only Azure MI returns
+the disambiguating `resource` field).
 
 The following remain **deferred** post-v0.9:
 
