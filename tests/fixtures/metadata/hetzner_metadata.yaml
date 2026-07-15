@@ -1,0 +1,5 @@
+availability-zone: hel1-dc2
+hostname: srv42.example.com
+instance-id: 4711
+public-ipv4: 1.2.3.4
+region: eu-central

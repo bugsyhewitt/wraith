@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="cloud_metadata",
         help=(
             "run the cloud-metadata detection probes (AWS IMDSv1/IMDSv2, GCP, "
-            "Azure, Alibaba, Oracle, DigitalOcean) -- criteria #3"
+            "Azure, Alibaba, Oracle, DigitalOcean, Hetzner) -- criteria #3"
         ),
     )
     scan.add_argument(
