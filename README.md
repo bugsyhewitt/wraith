@@ -18,7 +18,7 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.6. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.7. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
@@ -39,7 +39,14 @@ concern (see [Roadmap](#roadmap)).
 > SSRF injection and classify results as OPEN / FILTERED / CLOSED using
 > response-time and service-banner differentials. 25 default ports covering web,
 > SSH, databases, Kubernetes kubelet, Docker daemon, Redis, Elasticsearch, and
-> MongoDB. Emits medium/info findings with banner evidence.
+> MongoDB. Emits medium/info findings with banner evidence. v0.7 adds
+> **`file://` SSRF detection** (`wraith probe --scheme file`): inject
+> `file:///etc/passwd`, `file:///etc/hosts`, `file:///proc/version`, and other
+> local paths at the SSRF injection point and classify echoed responses for
+> local-file-content signatures. When the SSRF sink is curl-backed without a
+> `--proto` scheme restriction, the server reads its own filesystem. Confirmed
+> `file://` SSRF is a critical-severity finding (arbitrary local file read on the
+> server).
 > See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
 > [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
@@ -102,7 +109,7 @@ wraith is organized into subcommands: `scan` (detect + confirm), `dict`
 (read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.3.0
+wraith --version          # -> wraith 0.7.0
 wraith --help             # subcommand overview
 ```
 
@@ -180,6 +187,38 @@ wraith probe --scheme tftp -u "https://app.example.com/fetch?url=FUZZ" \
 wraith probe --scheme tftp -u "https://app.example.com/fetch?url=FUZZ" \
   --host 10.0.0.5 --tftp-files "/etc/passwd,/boot.ini" --scope-file scope.txt
 ```
+
+### `wraith probe --scheme file` -- file:// local file read via SSRF (v0.7)
+
+Inject `file://` URLs at the marked SSRF injection point and classify echoed
+responses for local-file-content signatures. If the SSRF sink is curl-backed
+without a `--proto` scheme allowlist, the server reads its own local filesystem
+and may echo sensitive file content through the injection point. Produces a
+`critical`-severity finding on confirmation.
+
+Works through curl-backed SSRF sinks (the most common class). Sinks with strict
+scheme restrictions (`--proto 'https'`) return an error safely; wraith treats those
+as no-hit and moves on. All probes are read-only.
+
+```bash
+# Default paths: /etc/passwd, /etc/hosts, /proc/version
+wraith probe --scheme file -u "https://app.example.com/fetch?url=FUZZ" \
+  --scope-file scope.txt
+
+# Custom paths (Unix + Windows)
+wraith probe --scheme file -u "https://app.example.com/fetch?url=FUZZ" \
+  --file-paths "/etc/passwd,/etc/shadow,/proc/self/environ" \
+  --scope-file scope.txt
+
+# Windows targets
+wraith probe --scheme file -u "https://app.example.com/fetch?url=FUZZ" \
+  --file-paths "C:/Windows/win.ini,C:/Windows/System32/drivers/etc/hosts" \
+  --scope-file scope.txt
+```
+
+Parameters:
+- `--file-paths PATHS` — comma-separated list of local file paths to probe
+  (default: `/etc/passwd,/etc/hosts,/proc/version`)
 
 ### `wraith gopher` -- gopher:// payload generator
 
@@ -306,7 +345,7 @@ prompt exists to prevent accidental use.
 | `wraith.metadata` | Cloud-metadata probes (AWS IMDSv1/IMDSv2, GCP, Azure, Alibaba, Oracle, DigitalOcean). | implemented |
 | `wraith.oob` | OOB confirmation: local dnslib+HTTP collaborator + interactsh-compatible client. | implemented |
 | `wraith.engine` | Scan orchestration: request-file parsing, injection, concurrent detect/confirm. | implemented |
-| `wraith.protocols` | `dict://` recon + `gopher://` payload generator (RESP / FastCGI). | implemented |
+| `wraith.protocols` | `dict://` recon + `gopher://` payload generator (RESP / FastCGI) + `ldap://` / `tftp://` / `file://` scheme probes. | implemented |
 | `wraith.mcp` | Version-gated MCP / AI-infra SSRF catalog (5 signatures) + internal MCP server discovery via SSRF (`detect_mcp_server_response`, `mcp_ssrf_urls`). | implemented |
 | `wraith.cli` | argparse CLI: `scan` / `dict` / `gopher` / `exploit`. | implemented |
 | `wraith.exploit` | Weaponized gopher:// sequences: Redis cron/SSH injection, FastCGI RCE (v0.2, `--exploit` gate). | implemented |
@@ -369,9 +408,14 @@ port scanning** (`wraith portscan`): fire `http://<host>:<port>/` at the
 marked SSRF injection point for each target port and classify results as OPEN /
 FILTERED / CLOSED using response-time and service-banner differentials. 25
 default ports; accepts `--ports 80,443,6379` or `--ports 8000-8100`. Emits
-medium (banner-confirmed) or info (anomalous timing) findings.
+medium (banner-confirmed) or info (anomalous timing) findings. v0.7 adds
+**`file://` SSRF detection** (`wraith probe --scheme file`): inject
+`file:///path` at the SSRF injection point and classify echoed responses for
+local-file-content signatures (`/etc/passwd`, `/etc/hosts`, `/proc/version`,
+`/proc/self/environ`, and Windows equivalents). Critical-severity finding when
+confirmed; read-only by nature.
 
-The following remain **deferred** post-v0.6:
+The following remain **deferred** post-v0.7:
 
 - **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
   modules for more capable post-exploitation.
