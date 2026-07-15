@@ -1,5 +1,9 @@
 # wraith
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bugsyhewitt/bugsyhewitt.github.io/main/public/cards/wraith.jpg" alt="wraith" width="680">
+</p>
+
 SSRF (Server-Side Request Forgery) detection and out-of-band confirmation for
 the modern bug-bounty and penetration-testing surface.
 
