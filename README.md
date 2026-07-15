@@ -18,56 +18,15 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.9.2. v0.1 shipped the detection + confirmation engine (the
-> filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
-> recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
-> exploitation behind an explicit `--exploit` gate (see
-> [Exploit Mode](#exploit-mode-v02)). v0.3 adds **MCP internal-SSRF discovery**:
-> `--mcp` probes the target's SSRF injection point to reach internal MCP servers
-> at well-known discovery paths. v0.4 adds **`ldap://` and `tftp://` scheme
-> probes** via `wraith probe --scheme ldap|tftp`: inject non-HTTP scheme URLs at
-> the SSRF injection point to reach internal LDAP directories (Root DSE read, LDIF
-> signatures) and TFTP servers (`/etc/passwd`, `/boot.ini` file-content
-> detection). Works through curl-backed SSRF sinks and any scheme-aware fetcher.
-> v0.5 completes the **cloud-metadata catalog**: adds Hetzner Cloud
-> (`169.254.169.254/hetzner/v1/metadata`, YAML-format response) with via-SSRF
-> response classification and a hermetic Tier-1 probe test. The full catalog now
-> covers AWS (IMDSv1 + IMDSv2 + header-injection), GCP, Azure, Alibaba, Oracle,
-> DigitalOcean, and Hetzner. Every request routes through the shared
-> `scan-primitives` scope-enforced client. v0.6 adds **SSRF-based internal port
-> scanning** (`wraith portscan`): probe a target port set on an internal host via
-> SSRF injection and classify results as OPEN / FILTERED / CLOSED using
-> response-time and service-banner differentials. 25 default ports covering web,
-> SSH, databases, Kubernetes kubelet, Docker daemon, Redis, Elasticsearch, and
-> MongoDB. Emits medium/info findings with banner evidence. v0.7 adds
-> **`file://` SSRF detection** (`wraith probe --scheme file`): inject
-> `file:///etc/passwd`, `file:///etc/hosts`, `file:///proc/version`, and other
-> local paths at the SSRF injection point and classify echoed responses for
-> local-file-content signatures. When the SSRF sink is curl-backed without a
-> `--proto` scheme restriction, the server reads its own filesystem. Confirmed
-> `file://` SSRF is a critical-severity finding (arbitrary local file read on the
-> server). v0.8 adds **open-redirect chaining** (`--redirect-url`): when a known
-> open-redirect endpoint exists on a trusted domain, wraith embeds the internal
-> SSRF target into the redirect parameter and generates three variants (raw,
-> URL-encoded, double-encoded). This bypasses allowlists that check only the outer
-> URL's domain (`startswith("https://trusted.com")`) — the SSRF sink follows the
-> redirect to the internal host. The three variants cover redirectors that pass
-> the destination verbatim, decode once, or decode twice (WAF double-encoding
-> bypass). The redirect-chain family is the highest-priority bypass class and
-> appears first in the mutator ordering. v0.9.2 adds **Azure managed-identity
-> credential endpoint** coverage: a second Azure IMDS probe at
-> `169.254.169.254/metadata/identity/oauth2/token` (the managed-identity OAuth2
-> token endpoint). This endpoint returns an actual `access_token` for the VM's
-> assigned managed identity and is distinct from the existing Azure instance
-> metadata probe (`/metadata/instance`, which returns only identity data at
-> `high` severity). The managed-identity token is a harvested credential →
-> `critical` severity. Both the direct-probe catalog (`wraith.metadata.CATALOG`)
-> and the via-SSRF injection list (`engine.METADATA_SSRF_URLS`) include the new
-> endpoint. The via-SSRF response classifier (`detect_from_response`) checks
-> `azure-managed-identity` before `gcp` to prevent Azure MI tokens (which also
-> carry `access_token`/`token_type`/`expires_in`) from being misclassified as GCP;
-> the disambiguator is the `resource` field present in Azure MI responses and
-> absent from GCP tokens.
+> **Status:** v1.0.0. The detection + confirmation engine is complete and stable:
+> filter-bypass mutator catalog, cloud-metadata probes (AWS IMDSv1/IMDSv2,
+> GCP, Azure instance + managed-identity, Alibaba, Oracle, DigitalOcean,
+> Hetzner), OOB confirmation, `dict://` recon, `gopher://` payload generator,
+> MCP catalog and internal-SSRF discovery, `ldap://`/`tftp://`/`file://`
+> scheme probes, SSRF-based port scanning, open-redirect chaining,
+> `--target-file` multi-target scanning, `--timeout`, weaponized `gopher://`
+> exploit sequences (v0.2), SARIF 2.1.0 export, HackerOne markdown output,
+> and the Azure managed-identity credential probe (critical severity).
 > See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
 > [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
@@ -130,7 +89,7 @@ wraith is organized into subcommands: `scan` (detect + confirm), `dict`
 (read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.9.2
+wraith --version          # -> wraith 1.0.0
 wraith --help             # subcommand overview
 ```
 
