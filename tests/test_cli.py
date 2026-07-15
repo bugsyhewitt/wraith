@@ -34,7 +34,7 @@ def test_version(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
-    assert capsys.readouterr().out.strip() == "wraith 0.7.0"
+    assert capsys.readouterr().out.strip() == "wraith 0.8.0"
 
 
 def test_no_subcommand_returns_2(capsys):
