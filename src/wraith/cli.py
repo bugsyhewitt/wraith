@@ -274,6 +274,73 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gopher.set_defaults(handler=_cmd_gopher)
 
+    # -- probe: ldap:// / tftp:// non-HTTP scheme recon (v0.4) ---------------
+    probe = sub.add_parser(
+        "probe",
+        help="ldap:// / tftp:// non-HTTP scheme recon via SSRF (read-only)",
+        description=(
+            "Inject non-HTTP scheme URLs (ldap://, tftp://) at the marked "
+            "injection point and classify echoed responses. All probes are "
+            "read-only. Works through curl-backed SSRF sinks and any sink "
+            "that passes the injected URL to a scheme-aware fetcher."
+        ),
+    )
+    probe.add_argument(
+        "--scheme",
+        choices=("ldap", "tftp"),
+        required=True,
+        help="scheme to probe: ldap (Root DSE recon) | tftp (file-read recon)",
+    )
+    probe.add_argument(
+        "-u", "--target", required=True, metavar="URL", help="target URL to probe"
+    )
+    probe.add_argument(
+        "--marker",
+        metavar="STR",
+        default="FUZZ",
+        help="injection marker (default: FUZZ)",
+    )
+    probe.add_argument(
+        "--param",
+        metavar="NAME",
+        help="mark the injection point by query-param name",
+    )
+    probe.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="internal host to probe through the SSRF (default: 127.0.0.1)",
+    )
+    probe.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="internal port (default: 389 for ldap, 69 for tftp)",
+    )
+    probe.add_argument(
+        "--ldap-base-dn",
+        metavar="DN",
+        dest="ldap_base_dn",
+        default="",
+        help="LDAP: base DN to query (default: empty = Root DSE)",
+    )
+    probe.add_argument(
+        "--tftp-files",
+        metavar="FILES",
+        dest="tftp_files",
+        default="/etc/passwd",
+        help=(
+            "TFTP: comma-separated list of file paths to probe "
+            "(default: /etc/passwd)"
+        ),
+    )
+    probe.add_argument(
+        "--scope-file",
+        metavar="FILE",
+        dest="scope_file",
+        help="scope allowlist enforced before any request",
+    )
+    probe.set_defaults(handler=_cmd_probe)
+
     # -- exploit: weaponized gopher:// sequences (--exploit gate required) ----
     exploit = sub.add_parser(
         "exploit",
@@ -538,6 +605,35 @@ def _cmd_gopher(args: argparse.Namespace) -> int:
         f"double_encode={args.double_encode}"
     )
     print(payload)
+    return 0
+
+
+def _cmd_probe(args: argparse.Namespace) -> int:
+    """ldap:// / tftp:// non-HTTP scheme recon via SSRF (v0.4)."""
+    import asyncio
+
+    from wraith.engine import Target
+    from wraith.protocols import ldap_recon, tftp_recon
+
+    scope = _load_scope_or_exit(args.scope_file)
+    if scope is None:
+        return 2
+
+    target = Target.from_url(args.target, marker=args.marker, param=args.param)
+
+    if args.scheme == "ldap":
+        port = args.port or 389
+        findings = asyncio.run(
+            ldap_recon(target, scope, host=args.host, port=port, base_dn=args.ldap_base_dn)
+        )
+    else:  # tftp
+        port = args.port or 69
+        files = tuple(f.strip() for f in args.tftp_files.split(",") if f.strip())
+        findings = asyncio.run(
+            tftp_recon(target, scope, host=args.host, port=port, files=files)
+        )
+
+    _emit(findings, "text")
     return 0
 
 

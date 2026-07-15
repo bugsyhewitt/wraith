@@ -18,17 +18,20 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.3. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.4. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
 > [Exploit Mode](#exploit-mode-v02)). v0.3 adds **MCP internal-SSRF discovery**:
-> `--mcp` now also probes the target's SSRF injection point to reach internal
-> MCP servers at well-known discovery paths (`/mcp`, `/__mcp`,
-> `/.well-known/mcp.json`, etc.) and classifies responses for MCP protocol
-> signatures. Every request routes through the shared `scan-primitives`
-> scope-enforced client. See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the
-> v0.1 build contract and [`RESEARCH.md`](RESEARCH.md) for the niche brief.
+> `--mcp` probes the target's SSRF injection point to reach internal MCP servers
+> at well-known discovery paths. v0.4 adds **`ldap://` and `tftp://` scheme
+> probes** via `wraith probe --scheme ldap|tftp`: inject non-HTTP scheme URLs at
+> the SSRF injection point to reach internal LDAP directories (Root DSE read, LDIF
+> signatures) and TFTP servers (`/etc/passwd`, `/boot.ini` file-content
+> detection). Works through curl-backed SSRF sinks and any scheme-aware fetcher.
+> Every request routes through the shared `scan-primitives` scope-enforced client.
+> See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
+> [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
 ## Ethical Use
 
@@ -136,6 +139,36 @@ Read-only `dict://` recon through an SSRF primitive: port/banner grab, Redis
 
 ```bash
 wraith dict -u "https://app.example.com/fetch?url=FUZZ" --scope-file scope.txt
+```
+
+### `wraith probe` -- ldap:// / tftp:// non-HTTP scheme recon (v0.4)
+
+Inject non-HTTP scheme URLs at the marked SSRF injection point and classify
+echoed responses. Works through curl-backed SSRF sinks and any sink that passes
+the injected URL to a scheme-aware fetcher. All probes are read-only.
+
+**`ldap://` (LDAP Root DSE)** — reaches internal LDAP/Active Directory servers;
+classifies LDIF-format responses for directory service signatures.
+
+```bash
+wraith probe --scheme ldap -u "https://app.example.com/fetch?url=FUZZ" \
+  --host 10.0.0.5 --port 389 --scope-file scope.txt
+
+# With a specific base DN
+wraith probe --scheme ldap -u "https://app.example.com/fetch?url=FUZZ" \
+  --host 10.0.0.5 --ldap-base-dn "dc=corp,dc=example" --scope-file scope.txt
+```
+
+**`tftp://` (TFTP file-read)** — reaches internal TFTP servers; classifies
+file-content signatures for `/etc/passwd` (Unix hosts) and `/boot.ini` (Windows).
+
+```bash
+wraith probe --scheme tftp -u "https://app.example.com/fetch?url=FUZZ" \
+  --host 10.0.0.5 --scope-file scope.txt
+
+# Probe multiple files
+wraith probe --scheme tftp -u "https://app.example.com/fetch?url=FUZZ" \
+  --host 10.0.0.5 --tftp-files "/etc/passwd,/boot.ini" --scope-file scope.txt
 ```
 
 ### `wraith gopher` -- gopher:// payload generator
@@ -316,9 +349,13 @@ v0.1 implemented the detection/confirmation engine per
 `gopher://` exploit sequences (see [Exploit Mode](#exploit-mode-v02)).
 v0.3 added MCP internal-SSRF discovery (`--mcp` now probes the injection
 point for internal MCP servers at well-known paths, not just the target as
-an MCP server).
+an MCP server). v0.4 adds **`ldap://` and `tftp://` scheme probes** (`wraith
+probe --scheme ldap|tftp`): inject non-HTTP scheme URLs at the marked SSRF
+injection point and classify LDAP Root DSE (LDIF signatures) or TFTP
+file-content (`/etc/passwd`, `/boot.ini`) in the echoed response. Works
+through curl-backed SSRF sinks.
 
-The following remain **deferred** post-v0.3:
+The following remain **deferred** post-v0.4:
 
 - **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
   modules for more capable post-exploitation.
