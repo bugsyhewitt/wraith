@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wraith"
-version = "0.8.0"
+version = "0.9.0"
 description = "SSRF detection and out-of-band confirmation scanner for the bug-bounty cloud-metadata, protocol-smuggling, and MCP attack surface."
 readme = "README.md"
 requires-python = ">=3.13"

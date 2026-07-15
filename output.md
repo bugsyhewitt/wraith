@@ -1,67 +1,76 @@
-# wraith v0.8.0 — Worker Output
+# wraith v0.9.0 — Worker Output
 
 ## Improvement shipped
 
-**Open-redirect chaining variants in the filter-bypass mutator catalog**
+**`--target-file` multi-target batch scanning**
 
 ### What
 
-Added `redirect_chain_variants()` to `wraith/mutators.py` and wired it into `build_variants()`, the scan engine, and the CLI.
+Added `--target-file FILE` to `wraith scan`. When provided, wraith reads a
+newline-delimited list of target URLs from the file (one per line, `#` comments
+and blank lines ignored), runs the full scan engine against each URL in
+sequence, deduplicates findings by ID across all targets, and emits a single
+combined findings list.
 
-When a known open-redirect endpoint exists on a trusted domain, wraith now generates **three redirect-chain bypass variants** per internal SSRF target:
+This enables batch scanning of multiple injection endpoints in a single
+invocation — the common case during a pentest where the target application has
+several URL parameters that accept URLs (a webhook, a proxy, a fetcher, etc.).
 
-| Variant name | Technique | Bypass target |
-|---|---|---|
-| `redirect-chain-raw` | Internal URL embedded verbatim | Redirectors that pass destination unchanged |
-| `redirect-chain-enc` | Internal URL percent-encoded once | Redirectors that call `unquote()` once before following |
-| `redirect-chain-double-enc` | Internal URL double-encoded | WAFs that only inspect outer encoding; redirectors that decode twice |
-
-All three variants are in the new `"redirect-chain"` family and appear **first** in the mutator ordering — the highest-priority bypass class (per V0.1-CRITERIA.md #2: "redirect-chain + @ → DNS-rebind → parser-differential → encoding → scheme").
-
-### Why this was chosen
-
-The README and V0.1-CRITERIA.md #2 both explicitly list "open-redirect chaining" as a feature of the filter-bypass mutator catalog. The criteria even specify "redirect-chain" as the first family in the default ordering. It was listed but not implemented — a documented gap in a core module.
-
-Real-world impact: domain-allowlist SSRF filters are common in modern apps. A filter that checks `url.startswith("https://trusted.com/")` is bypassed by `https://trusted.com/redir?next=http://169.254.169.254/latest/meta-data/`. The three encoding variants additionally bypass WAF layers that inspect the outer URL before the redirect handler decodes it.
+Key behaviors:
+- Blank lines and lines starting with `#` are silently skipped.
+- Fails cleanly (exit 2) if the file cannot be opened or contains no valid URLs.
+- Cannot be combined with `-r/--request-file` (mutually exclusive).
+- Deduplication is by finding `id` — two identical targets that return the same
+  finding only emit it once in the output.
+- Works with all output formats: `json`, `text`, `h1md`, `sarif`.
 
 ### Files changed
 
 | File | Change |
 |---|---|
-| `src/wraith/mutators.py` | Added `redirect_chain_variants()`, updated `build_variants()` to accept `redirect_url`/`redirect_marker` params, updated `__all__` and module docstring |
-| `src/wraith/engine.py` | Added `redirect_url`/`redirect_marker` params to `run_scan()`, passes them through to `build_variants()` |
-| `src/wraith/cli.py` | Added `--redirect-url REDIR_URL` argument to `wraith scan`, wires it into `run_scan()` |
-| `src/wraith/__init__.py` | Version bumped: `0.7.0` → `0.8.0` |
-| `pyproject.toml` | Version bumped: `0.7.0` → `0.8.0` |
-| `README.md` | Updated status, documented `--redirect-url`, updated modules table and roadmap |
-| `tests/test_mutators.py` | Added 14 new Tier-0 tests covering: exact-byte assertions on all 3 variants, custom marker, ordering, integration with `build_variants`, backward compatibility |
-| `tests/test_cli.py` | Updated `test_version` to expect `wraith 0.8.0` |
+| `src/wraith/cli.py` | Added `--target-file` arg to `_add_target_group()`; added `_read_target_file()` helper; factored `_run_single_scan()` out of `_cmd_scan`; updated `_cmd_scan` to handle multi-target loop with deduplication |
+| `src/wraith/__init__.py` | Version bumped: `0.8.0` → `0.9.0` |
+| `pyproject.toml` | Version bumped: `0.8.0` → `0.9.0` |
+| `README.md` | Updated status line, version in `--version` example, documented `--target-file` in the `wraith scan` section (usage example + parameter description + file format block), updated roadmap |
+| `tests/test_cli.py` | Updated `test_version` to expect `wraith 0.9.0`; added 7 new tests |
 
 ### Test results
 
 ```
-249 passed, 5 deselected in ~13s
+256 passed, 5 deselected in ~14s
 ```
 
-14 new tests added (235 → 249). All pass. See `test-output.txt` for full output.
+7 new tests added (249 → 256). All pass. See `test-output.txt` for full output.
+
+### New tests
+
+| Test | Coverage |
+|---|---|
+| `test_target_file_basic_scan` | Single URL in `--target-file` produces same findings as `-u` (live mock) |
+| `test_target_file_multi_url_deduplicates` | Identical URL listed twice yields no duplicate finding IDs |
+| `test_target_file_skips_comments_and_blanks` | `_read_target_file` unit: only non-comment, non-blank lines returned |
+| `test_target_file_empty_raises_systemexit` | All-comment file exits 2 with "no target URLs" message |
+| `test_target_file_missing_file_raises_systemexit` | Nonexistent file exits 2 with "cannot open" message |
+| `test_target_file_and_request_file_are_mutually_exclusive` | `--target-file` + `-r` → exit 2 "mutually exclusive" |
+| `test_scan_no_input_returns_2` | scan with no `-u`, `-r`, `--target-file` → exit 2 |
 
 ### CLI example
 
 ```bash
-# Chain through an open redirect on a trusted domain
+# Create a target file
+cat > targets.txt <<'EOF'
+# Production endpoints
+https://api.example.com/proxy?url=FUZZ
+https://api.example.com/fetch?src=FUZZ
+
+# Staging
+https://staging.example.com/webhook?callback=FUZZ
+EOF
+
+# Scan all three endpoints, emit combined findings as SARIF
 wraith scan \
-  -u "https://app.example.com/fetch?url=FUZZ" \
+  --target-file targets.txt \
   --scope-file scope.txt \
-  --redirect-url "https://trusted.example.com/redir?next=FUZZ" \
   --cloud-metadata \
-  --format json
+  --format sarif > findings.sarif
 ```
-
-Emits redirect-chain variants like:
-```
-https://trusted.example.com/redir?next=http://169.254.169.254/latest/meta-data/
-https://trusted.example.com/redir?next=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F
-https://trusted.example.com/redir?next=http%253A%252F%252F169.254.169.254%252Flatest%252Fmeta-data%252F
-```
-
-The outer URLs pass a `trusted.example.com` allowlist check; the sink follows to 169.254.169.254.
