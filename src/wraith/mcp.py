@@ -20,23 +20,33 @@ The five (version-gated + cited; some are unpatched / 2026-dated):
 The endpoint paths are the commonly HTTP-exposed form of each sink; the durable
 value is the version gate + CVE citation + the URL-bearing parameter, all of
 which flow into the finding. R5: nothing here evaluates fetched content.
+
+**MCP internal-SSRF discovery** (v0.3 addition): a second detection mode probes
+the target's SSRF injection point to reach *internal* MCP servers at well-known
+discovery paths (``/mcp``, ``/__mcp``, ``/.well-known/mcp.json``, etc.) and
+classifies responses against MCP protocol signatures. Use
+:func:`mcp_ssrf_urls` + :func:`detect_mcp_server_response` with the engine's
+``extra_targets`` + ``mcp_discovery`` flow.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from wraith.engine import InjectionPoint, Target, run_scan
 from wraith.findings import Finding
 from wraith.oob import Collaborator
 
 __all__ = [
     "McpSignature",
     "MCP_CATALOG",
+    "MCP_DISCOVERY_PATHS",
+    "MCP_SERVER_SIGNATURES",
     "version_affected",
     "applicable",
     "mcp_target",
     "scan_mcp",
+    "detect_mcp_server_response",
+    "mcp_ssrf_urls",
 ]
 
 
@@ -55,6 +65,73 @@ class McpSignature:
     cve: tuple[str, ...]
     references: tuple[str, ...]
     notes: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# MCP internal-SSRF discovery (v0.3)
+# --------------------------------------------------------------------------- #
+
+# Well-known paths that MCP servers expose as their primary HTTP endpoint.
+# Used as internal SSRF target paths: inject these into the target's SSRF
+# injection point to detect whether an internal MCP server is reachable.
+# Ordered by deployment frequency (most common first).
+MCP_DISCOVERY_PATHS: list[str] = [
+    "/mcp",
+    "/__mcp",
+    "/.well-known/mcp.json",
+    "/api/mcp",
+    "/v1/mcp",
+    "/.mcp",
+    "/mcp/v1",
+]
+
+# Substrings from the MCP JSON-RPC protocol that identify a server response.
+# These appear in initialize/capabilities/tools-list responses and in
+# well-known metadata files. R5: data-only substring matching, never eval'd.
+MCP_SERVER_SIGNATURES: tuple[str, ...] = (
+    "protocolVersion",
+    "capabilities",
+    "serverInfo",
+    '"tools"',
+    '"prompts"',
+    '"resources"',
+    "jsonrpc",
+    "McpServer",
+)
+
+_MCP_SIG_MIN_HITS = 2
+
+
+def detect_mcp_server_response(text: str) -> bool:
+    """True when ``text`` looks like an MCP server endpoint response.
+
+    Checks for at least two MCP protocol field names in the response body
+    (R5: data-only substring matching -- the bytes are never evaluated).
+    """
+    hits = sum(1 for sig in MCP_SERVER_SIGNATURES if sig in text)
+    return hits >= _MCP_SIG_MIN_HITS
+
+
+def mcp_ssrf_urls(
+    internal_host: str = "127.0.0.1",
+    port: int | None = None,
+) -> list[tuple[str, str]]:
+    """Internal target ``(label, url)`` tuples for MCP server discovery via SSRF.
+
+    Each tuple feeds directly into :func:`wraith.engine.run_scan` as an
+    ``extra_targets`` entry. The engine injects each URL at the target's marked
+    injection point (filter-bypass mutator catalog applied), then
+    :func:`detect_mcp_server_response` classifies the echoed response.
+
+    Args:
+        internal_host: Internal host to probe for MCP servers (default: 127.0.0.1).
+        port: TCP port (default: None → omitted from the URL, browser-default 80/443).
+    """
+    hostport = f"{internal_host}:{port}" if port is not None else internal_host
+    return [
+        (f"mcp-discovery{path.replace('/', '-')}", f"http://{hostport}{path}")
+        for path in MCP_DISCOVERY_PATHS
+    ]
 
 
 MCP_CATALOG: list[McpSignature] = [
@@ -193,8 +270,10 @@ def applicable(version: str | None = None) -> list[McpSignature]:
     return [s for s in MCP_CATALOG if version_affected(version, s.affected)]
 
 
-def mcp_target(sig: McpSignature, base_url: str, *, marker: str = "FUZZ") -> Target:
-    """Build the injection :class:`Target` for a signature against ``base_url``."""
+def mcp_target(sig: McpSignature, base_url: str, *, marker: str = "FUZZ"):
+    """Build the injection Target for a signature against ``base_url``."""
+    from wraith.engine import InjectionPoint, Target
+
     base = base_url.rstrip("/")
     url = f"{base}{sig.path}"
     if sig.param_in == "query":
@@ -228,6 +307,7 @@ async def scan_mcp(
     id and CVE(s).
     """
     from wraith.client import get_client
+    from wraith.engine import run_scan
 
     own = client is None
     client = client or get_client(scope)

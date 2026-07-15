@@ -15,9 +15,14 @@ from werkzeug.wrappers import Response as WZResponse
 
 import httpx
 
+from wraith.engine import Target, run_scan
 from wraith.mcp import (
     MCP_CATALOG,
+    MCP_DISCOVERY_PATHS,
+    MCP_SERVER_SIGNATURES,
     applicable,
+    detect_mcp_server_response,
+    mcp_ssrf_urls,
     mcp_target,
     scan_mcp,
     version_affected,
@@ -155,3 +160,143 @@ def test_scan_mcp_confirms_fetch_mcp_via_oob(local_collab, httpserver):
     assert "CVE-2025-65513" in f.evidence.get("cve", [])
     assert any("CVE-2025-65513" in r for r in f.references)
     assert f.oob_proof.startswith("http:")
+
+
+# --------------------------------------------------------------------------- #
+# MCP internal-SSRF discovery (v0.3)
+# --------------------------------------------------------------------------- #
+
+class TestMcpDiscoveryPaths:
+    def test_discovery_paths_are_nonempty(self):
+        assert MCP_DISCOVERY_PATHS
+        assert all(p.startswith("/") for p in MCP_DISCOVERY_PATHS)
+
+    def test_known_paths_present(self):
+        paths = set(MCP_DISCOVERY_PATHS)
+        assert "/mcp" in paths
+        assert "/__mcp" in paths
+        assert "/.well-known/mcp.json" in paths
+
+
+class TestDetectMcpServerResponse:
+    def test_returns_true_for_two_matching_signatures(self):
+        body = '{"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}'
+        assert detect_mcp_server_response(body) is True
+
+    def test_returns_false_for_one_matching_signature(self):
+        body = '{"protocolVersion":"2024-11-05"}'
+        assert detect_mcp_server_response(body) is False
+
+    def test_returns_false_for_unrelated_json(self):
+        assert detect_mcp_server_response('{"status":"ok","message":"hello"}') is False
+
+    def test_returns_false_for_empty(self):
+        assert detect_mcp_server_response("") is False
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # MCP initialize response shape
+            '{"protocolVersion":"2024-11-05","serverInfo":{"name":"test"}}',
+            # MCP tools-list response shape
+            '{"jsonrpc":"2.0","result":{"tools":[],"capabilities":{}}}',
+            # MCP well-known metadata file
+            '{"name":"my-mcp-server","capabilities":{"tools":{},"resources":{}}}',
+        ],
+    )
+    def test_recognises_real_mcp_response_shapes(self, body):
+        assert detect_mcp_server_response(body) is True
+
+    def test_r5_no_exception_on_binary_garbage(self):
+        # R5: response bytes are data -- must not raise even on non-UTF garbage.
+        garbage = "\x00\xff\xfe protocolVersion capabilities \x00"
+        # May be True or False but must not raise.
+        result = detect_mcp_server_response(garbage)
+        assert isinstance(result, bool)
+
+
+class TestMcpSsrfUrls:
+    def test_returns_one_entry_per_discovery_path(self):
+        urls = mcp_ssrf_urls()
+        assert len(urls) == len(MCP_DISCOVERY_PATHS)
+
+    def test_default_host_is_loopback(self):
+        urls = mcp_ssrf_urls()
+        assert all("127.0.0.1" in u for _, u in urls)
+
+    def test_custom_host_and_port_embedded(self):
+        urls = mcp_ssrf_urls("10.0.0.5", 8080)
+        assert all("10.0.0.5:8080" in u for _, u in urls)
+
+    def test_discovery_paths_appear_in_urls(self):
+        urls = mcp_ssrf_urls()
+        url_strings = {u for _, u in urls}
+        assert any("/mcp" in u for u in url_strings)
+        assert any("/.well-known/mcp.json" in u for u in url_strings)
+
+    def test_labels_are_unique(self):
+        labels = [label for label, _ in mcp_ssrf_urls()]
+        assert len(labels) == len(set(labels))
+
+
+class TestRunScanMcpDiscovery:
+    """Tier-2 (loopback httpserver) test: run_scan with mcp_discovery=True detects
+    an echoed MCP server response and emits a finding."""
+
+    def test_mcp_server_reached_via_ssrf_emits_finding(self, httpserver):
+        """An SSRF-proxying target that echoes MCP server responses produces a finding."""
+        from werkzeug.wrappers import Response as WZResponse
+
+        mcp_body = (
+            '{"protocolVersion":"2024-11-05","serverInfo":{"name":"internal-mcp"},'
+            '"capabilities":{"tools":{},"resources":{}}}'
+        )
+
+        def proxy_handler(request):
+            injected = request.args.get("url", "")
+            if "/mcp" in injected:
+                return WZResponse(mcp_body, content_type="application/json")
+            return WZResponse("nothing", content_type="text/plain")
+
+        httpserver.expect_request("/proxy").respond_with_handler(proxy_handler)
+        base = httpserver.url_for("/proxy")
+        scope = Scope.from_entries(["127.0.0.1"])
+        target = Target.from_url(f"{base}?url=FUZZ", marker="FUZZ")
+
+        findings = asyncio.run(
+            run_scan(
+                target,
+                scope,
+                mcp_discovery=True,
+                mcp_discovery_host="127.0.0.1",
+            )
+        )
+
+        mcp_findings = [f for f in findings if "MCP server" in f.title]
+        assert mcp_findings, (
+            f"no MCP-server finding; got titles: {[f.title for f in findings]}"
+        )
+        f = mcp_findings[0]
+        assert f.cwe_id == 918
+        assert f.severity == "high"
+        assert "internal_url" in f.evidence
+
+    def test_no_mcp_finding_when_discovery_disabled(self, httpserver):
+        """Without mcp_discovery=True, MCP server responses are not classified."""
+        from werkzeug.wrappers import Response as WZResponse
+
+        mcp_body = (
+            '{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},'
+            '"serverInfo":{"name":"hidden"}}'
+        )
+
+        httpserver.expect_request("/proxy").respond_with_handler(
+            lambda r: WZResponse(mcp_body, content_type="application/json")
+        )
+        base = httpserver.url_for("/proxy")
+        scope = Scope.from_entries(["127.0.0.1"])
+        target = Target.from_url(f"{base}?url=FUZZ", marker="FUZZ")
+
+        findings = asyncio.run(run_scan(target, scope, mcp_discovery=False))
+        mcp_findings = [f for f in findings if "MCP server" in f.title]
+        assert not mcp_findings, "MCP finding emitted without mcp_discovery=True"
