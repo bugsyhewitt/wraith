@@ -18,7 +18,7 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.5. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.6. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
@@ -34,7 +34,12 @@ concern (see [Roadmap](#roadmap)).
 > response classification and a hermetic Tier-1 probe test. The full catalog now
 > covers AWS (IMDSv1 + IMDSv2 + header-injection), GCP, Azure, Alibaba, Oracle,
 > DigitalOcean, and Hetzner. Every request routes through the shared
-> `scan-primitives` scope-enforced client.
+> `scan-primitives` scope-enforced client. v0.6 adds **SSRF-based internal port
+> scanning** (`wraith portscan`): probe a target port set on an internal host via
+> SSRF injection and classify results as OPEN / FILTERED / CLOSED using
+> response-time and service-banner differentials. 25 default ports covering web,
+> SSH, databases, Kubernetes kubelet, Docker daemon, Redis, Elasticsearch, and
+> MongoDB. Emits medium/info findings with banner evidence.
 > See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
 > [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
@@ -358,9 +363,15 @@ an MCP server). v0.4 adds **`ldap://` and `tftp://` scheme probes** (`wraith
 probe --scheme ldap|tftp`): inject non-HTTP scheme URLs at the marked SSRF
 injection point and classify LDAP Root DSE (LDIF signatures) or TFTP
 file-content (`/etc/passwd`, `/boot.ini`) in the echoed response. Works
-through curl-backed SSRF sinks.
+through curl-backed SSRF sinks. v0.5 completes the **cloud-metadata catalog**
+(Hetzner — catalog now covers 7 providers). v0.6 adds **SSRF-based internal
+port scanning** (`wraith portscan`): fire `http://<host>:<port>/` at the
+marked SSRF injection point for each target port and classify results as OPEN /
+FILTERED / CLOSED using response-time and service-banner differentials. 25
+default ports; accepts `--ports 80,443,6379` or `--ports 8000-8100`. Emits
+medium (banner-confirmed) or info (anomalous timing) findings.
 
-The following remain **deferred** post-v0.4:
+The following remain **deferred** post-v0.6:
 
 - **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
   modules for more capable post-exploitation.

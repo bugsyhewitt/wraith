@@ -341,6 +341,67 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.set_defaults(handler=_cmd_probe)
 
+    # -- portscan: SSRF-based internal port scanner (v0.6) --------------------
+    portscan = sub.add_parser(
+        "portscan",
+        help="probe internal ports via SSRF injection (timing + banner detection)",
+        description=(
+            "Fire http://<host>:<port>/ at the marked SSRF injection point for each "
+            "target port and classify responses as OPEN / FILTERED / CLOSED using "
+            "response-time and service-banner differentials. Emits findings for "
+            "reachable internal ports. All probes are read-only HTTP GETs."
+        ),
+    )
+    _add_target_group(portscan)
+    portscan.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="internal host to port-scan through the SSRF (default: 127.0.0.1)",
+    )
+    portscan.add_argument(
+        "--ports",
+        metavar="PORTS",
+        help=(
+            "comma-separated port list, or a range like 80-443, or 'default' "
+            "for the built-in 25-port list (default: default)"
+        ),
+        default="default",
+    )
+    portscan.add_argument(
+        "--concurrency",
+        type=int,
+        default=10,
+        metavar="N",
+        help="max concurrent in-flight probes (default: 10)",
+    )
+    portscan.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+        metavar="SECS",
+        help="per-probe timeout in seconds (default: 5.0)",
+    )
+    portscan.add_argument(
+        "--format",
+        choices=("json", "text", "h1md", "sarif"),
+        default="json",
+        dest="output_format",
+        help="output format for findings (default: json)",
+    )
+    portscan.add_argument(
+        "--rate-limit",
+        type=float,
+        dest="rate_limit",
+        metavar="RPS",
+        help="max requests/second (default: unlimited)",
+    )
+    portscan.add_argument(
+        "--proxy",
+        metavar="URL",
+        help="route traffic through an http/https/socks proxy",
+    )
+    portscan.set_defaults(handler=_cmd_portscan)
+
     # -- exploit: weaponized gopher:// sequences (--exploit gate required) ----
     exploit = sub.add_parser(
         "exploit",
@@ -634,6 +695,63 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         )
 
     _emit(findings, "text")
+    return 0
+
+
+def _parse_ports(ports_arg: str) -> tuple[int, ...]:
+    """Parse ``--ports`` into a tuple of ints.
+
+    Accepts: ``"default"``, a comma-separated list (``"80,443,8080"``), or a
+    range (``"8000-8100"``).
+    """
+    from wraith.portscan import DEFAULT_PORTS
+
+    if ports_arg == "default":
+        return DEFAULT_PORTS
+    if "-" in ports_arg and "," not in ports_arg:
+        start, _, end = ports_arg.partition("-")
+        return tuple(range(int(start), int(end) + 1))
+    return tuple(int(p.strip()) for p in ports_arg.split(",") if p.strip())
+
+
+def _cmd_portscan(args: argparse.Namespace) -> int:
+    """SSRF-based internal port scan (v0.6)."""
+    import asyncio
+    import sys
+
+    from wraith.engine import Target
+    from wraith.portscan import scan_ports
+
+    if not args.target and not getattr(args, "request_file", None):
+        print("error: one of -u/--target or -r/--request-file is required", file=sys.stderr)
+        return 2
+    scope = _load_scope_or_exit(args.scope_file)
+    if scope is None:
+        return 2
+
+    if getattr(args, "request_file", None):
+        target = Target.from_request_file(
+            args.request_file, marker=args.marker, param=getattr(args, "param", None)
+        )
+    else:
+        target = Target.from_url(
+            args.target, marker=args.marker, param=getattr(args, "param", None)
+        )
+
+    ports = _parse_ports(args.ports)
+    findings = asyncio.run(
+        scan_ports(
+            target,
+            scope,
+            host=args.host,
+            ports=ports,
+            concurrency=args.concurrency,
+            timeout=args.timeout,
+            rate_limit=args.rate_limit,
+            proxy=args.proxy,
+        )
+    )
+    _emit(findings, args.output_format)
     return 0
 
 
