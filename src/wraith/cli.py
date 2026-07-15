@@ -157,6 +157,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="TCP port for --mcp-host MCP server discovery (default: no port specified)",
     )
     scan.add_argument(
+        "--redirect-url",
+        metavar="REDIR_URL",
+        dest="redirect_url",
+        default=None,
+        help=(
+            "open-redirect endpoint to chain the SSRF through, with FUZZ marking "
+            "where the internal URL is embedded "
+            "(e.g. 'https://trusted.com/redir?next=FUZZ'). "
+            "Generates 3 redirect-chain variants per internal target: raw, "
+            "URL-encoded, and double-encoded. Use when the target's filter only "
+            "checks the outer URL's domain."
+        ),
+    )
+    scan.add_argument(
         "--concurrency",
         type=int,
         default=10,
@@ -609,6 +623,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 mcp_discovery=bool(args.mcp),
                 mcp_discovery_host=getattr(args, "mcp_host", "127.0.0.1"),
                 mcp_discovery_port=getattr(args, "mcp_port", None),
+                redirect_url=getattr(args, "redirect_url", None),
             )
         )
         # When --mcp is set, also run the CVE-based MCP catalog against the

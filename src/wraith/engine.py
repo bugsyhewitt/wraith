@@ -267,6 +267,8 @@ async def run_scan(
     extra_targets: list[tuple[str, str]] | None = None,
     client: ScanClient | None = None,
     oob_timeout: float = 5.0,
+    redirect_url: str | None = None,
+    redirect_marker: str = "FUZZ",
 ) -> list[Finding]:
     """Run the SSRF detect+confirm scan and return deduped findings.
 
@@ -284,6 +286,14 @@ async def run_scan(
             targets. Responses are classified by :func:`wraith.mcp.detect_mcp_server_response`.
         mcp_discovery_host: Internal host to probe for MCP servers (default: 127.0.0.1).
         mcp_discovery_port: TCP port for the MCP discovery host (default: None → no port).
+        redirect_url: Optional open-redirect endpoint template (v0.8). When
+            provided, three redirect-chain variants are prepended for each
+            internal SSRF target -- the highest-priority bypass class. The
+            ``redirect_marker`` token in the template is replaced with each
+            internal URL (raw, URL-encoded, double-encoded). Example:
+            ``https://trusted.com/redir?next=FUZZ``.
+        redirect_marker: Token in ``redirect_url`` replaced with the internal
+            URL (default: ``"FUZZ"``).
     """
     # 1) Assemble internal targets: (label, url, canary|None).
     targets: list[tuple[str, str, Canary | None]] = []
@@ -309,7 +319,12 @@ async def run_scan(
     work: list[tuple[Variant, str, Canary | None]] = []
     decoy = target.host or "localhost"
     for _label, url, tgt_canary in targets:
-        for variant in build_variants(url, decoy=decoy):
+        for variant in build_variants(
+            url,
+            decoy=decoy,
+            redirect_url=redirect_url,
+            redirect_marker=redirect_marker,
+        ):
             work.append((variant, url, tgt_canary))
 
     own_client = client is None

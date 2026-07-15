@@ -18,7 +18,7 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.7. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.8. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
@@ -46,7 +46,15 @@ concern (see [Roadmap](#roadmap)).
 > local-file-content signatures. When the SSRF sink is curl-backed without a
 > `--proto` scheme restriction, the server reads its own filesystem. Confirmed
 > `file://` SSRF is a critical-severity finding (arbitrary local file read on the
-> server).
+> server). v0.8 adds **open-redirect chaining** (`--redirect-url`): when a known
+> open-redirect endpoint exists on a trusted domain, wraith embeds the internal
+> SSRF target into the redirect parameter and generates three variants (raw,
+> URL-encoded, double-encoded). This bypasses allowlists that check only the outer
+> URL's domain (`startswith("https://trusted.com")`) — the SSRF sink follows the
+> redirect to the internal host. The three variants cover redirectors that pass
+> the destination verbatim, decode once, or decode twice (WAF double-encoding
+> bypass). The redirect-chain family is the highest-priority bypass class and
+> appears first in the mutator ordering.
 > See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
 > [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
@@ -147,6 +155,13 @@ wraith scan -r request.txt --param url --oob https://oob.example.net --mcp
 - `--mcp-host HOST` &mdash; internal host to probe for MCP servers via SSRF
   discovery (default: `127.0.0.1`).
 - `--mcp-port PORT` &mdash; TCP port for `--mcp-host` (default: omitted).
+- `--redirect-url REDIR_URL` &mdash; open-redirect endpoint to chain the SSRF
+  through (v0.8). Provide the redirect URL with `FUZZ` where the internal
+  target URL should be embedded, e.g.
+  `https://trusted.com/redir?next=FUZZ`. Generates 3 redirect-chain variants
+  (raw, URL-encoded, double-encoded) per internal target — the highest-priority
+  bypass class, placed first in the mutator ordering. Use when the target's
+  filter only checks the outer URL's domain.
 - `--format {json,text,h1md,sarif}` &mdash; finding output format.
 
 ### `wraith dict` -- dict:// read-only recon
@@ -341,7 +356,7 @@ prompt exists to prevent accidental use.
 | `wraith.sarif` | `to_sarif(findings) -> dict` &mdash; SARIF 2.1.0 export. | implemented |
 | `wraith.reporting` | `to_h1md(findings) -> str` &mdash; HackerOne markdown via `h1-reporter`. | implemented |
 | `wraith.client` | Scope-enforced HTTP boundary (wired to `scan-primitives`). | implemented |
-| `wraith.mutators` | Filter-bypass variant catalog (IP encodings, `@`/`#`/`\`, CRLF, scheme, rebind). | implemented |
+| `wraith.mutators` | Filter-bypass variant catalog (IP encodings, `@`/`#`/`\`, CRLF, scheme, rebind, open-redirect chaining). | implemented |
 | `wraith.metadata` | Cloud-metadata probes (AWS IMDSv1/IMDSv2, GCP, Azure, Alibaba, Oracle, DigitalOcean). | implemented |
 | `wraith.oob` | OOB confirmation: local dnslib+HTTP collaborator + interactsh-compatible client. | implemented |
 | `wraith.engine` | Scan orchestration: request-file parsing, injection, concurrent detect/confirm. | implemented |
@@ -413,9 +428,14 @@ medium (banner-confirmed) or info (anomalous timing) findings. v0.7 adds
 `file:///path` at the SSRF injection point and classify echoed responses for
 local-file-content signatures (`/etc/passwd`, `/etc/hosts`, `/proc/version`,
 `/proc/self/environ`, and Windows equivalents). Critical-severity finding when
-confirmed; read-only by nature.
+confirmed; read-only by nature. v0.8 adds **open-redirect chaining**
+(`--redirect-url`): when a known open-redirect on a trusted domain is
+available, wraith generates three bypass variants (raw, URL-encoded,
+double-encoded) for each internal SSRF target and places them at the head of
+the mutator ordering. Bypasses domain-allowlist filters that only check the
+outer URL's hostname.
 
-The following remain **deferred** post-v0.7:
+The following remain **deferred** post-v0.8:
 
 - **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
   modules for more capable post-exploitation.

