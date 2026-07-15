@@ -47,6 +47,11 @@ METADATA_SSRF_URLS: list[tuple[str, str]] = [
     ("digitalocean", "http://169.254.169.254/metadata/v1.json"),
     ("gcp", "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"),
     ("azure", "http://169.254.169.254/metadata/instance?api-version=2021-02-01"),
+    # Azure managed identity: credential endpoint (OAuth2 access_token).
+    # Injected separately from the instance-metadata URL because the response
+    # shape is credential-shaped (access_token) rather than identity-shaped
+    # (vmId/subscriptionId) and warrants a critical-severity finding.
+    ("azure-managed-identity", "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/"),
     ("oracle", "http://192.0.0.192/opc/v2/instance/"),
 ]
 
