@@ -279,6 +279,7 @@ def test_out_of_scope_metadata_base_is_skipped_not_raised():
         ("alibaba_ram_credentials.json", "alibaba", "critical"),
         ("oracle_instance.json", "oracle", "high"),
         ("digitalocean_metadata.json", "digitalocean", "high"),
+        ("hetzner_metadata.yaml", "hetzner", "high"),
     ],
 )
 def test_detect_from_response_classifies_fixtures(fixture, provider, severity):
@@ -289,6 +290,41 @@ def test_detect_from_response_classifies_fixtures(fixture, provider, severity):
     assert got_provider == provider
     assert got_severity == severity
     assert len(matched) >= 2
+
+
+def test_hetzner_probe_no_auth_required():
+    """Hetzner IMDS requires no auth header and returns YAML."""
+    hetzner = (_FIXTURES / "hetzner_metadata.yaml").read_text()
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get(host="169.254.169.254", path="/hetzner/v1/metadata").mock(
+            return_value=httpx.Response(200, text=hetzner)
+        )
+
+        async def go():
+            async with get_client(_scope()) as client:
+                return await _probe_simple(client, _catalog_probe("hetzner"))
+
+        finding = _run(go())
+
+    req = route.calls.last.request
+    # Hetzner IMDS: no auth header required.
+    assert "authorization" not in req.headers
+    assert finding is not None and finding.severity == "high"
+    assert finding.evidence.get("provider") == "hetzner"
+
+
+def test_hetzner_probe_no_finding_on_miss():
+    """A non-Hetzner response at the path produces no finding."""
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(host="169.254.169.254", path="/hetzner/v1/metadata").mock(
+            return_value=httpx.Response(404, text="Not Found")
+        )
+
+        async def go():
+            async with get_client(_scope()) as client:
+                return await _probe_simple(client, _catalog_probe("hetzner"))
+
+        assert _run(go()) is None
 
 
 def test_detect_from_response_none_for_benign_body():

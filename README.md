@@ -7,7 +7,7 @@ wraith resurrects the dead-ancestor SSRF tooling
 ([SSRFmap](https://github.com/swisskyrepo/SSRFmap),
 [Gopherus](https://github.com/tarunkant/Gopherus)) as a headless, CLI-first tool
 that owns the 2025-2026 frontier: current cloud-metadata endpoints (AWS IMDSv2,
-GCP, Azure, Alibaba, Oracle, DigitalOcean), modern filter bypasses (DNS
+GCP, Azure, Alibaba, Oracle, DigitalOcean, Hetzner), modern filter bypasses (DNS
 rebinding, open-redirect chaining, IPv6 and decimal/octal/hex IP encodings),
 out-of-band callback confirmation (interactsh-compatible), `dict://` / `gopher://`
 protocol tooling, and the emerging MCP / AI-infrastructure SSRF class.
@@ -18,7 +18,7 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.4. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.5. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
@@ -29,7 +29,12 @@ concern (see [Roadmap](#roadmap)).
 > the SSRF injection point to reach internal LDAP directories (Root DSE read, LDIF
 > signatures) and TFTP servers (`/etc/passwd`, `/boot.ini` file-content
 > detection). Works through curl-backed SSRF sinks and any scheme-aware fetcher.
-> Every request routes through the shared `scan-primitives` scope-enforced client.
+> v0.5 completes the **cloud-metadata catalog**: adds Hetzner Cloud
+> (`169.254.169.254/hetzner/v1/metadata`, YAML-format response) with via-SSRF
+> response classification and a hermetic Tier-1 probe test. The full catalog now
+> covers AWS (IMDSv1 + IMDSv2 + header-injection), GCP, Azure, Alibaba, Oracle,
+> DigitalOcean, and Hetzner. Every request routes through the shared
+> `scan-primitives` scope-enforced client.
 > See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
 > [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 

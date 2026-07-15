@@ -157,6 +157,21 @@ CATALOG: list[MetadataProbe] = [
         severity="high",
         references=(_CWE_REF,),
     ),
+    MetadataProbe(
+        provider="hetzner",
+        name="hetzner-instance-metadata",
+        base="http://169.254.169.254",
+        path="/hetzner/v1/metadata",
+        # No auth header; response is YAML (content-type: text/yaml).
+        # Hyphenated YAML keys are distinctive vs JSON-format providers.
+        signatures=("availability-zone:", "instance-id:", "public-ipv4:"),
+        min_hits=2,
+        severity="high",
+        references=(
+            _CWE_REF,
+            "https://docs.hetzner.cloud/#server-metadata",
+        ),
+    ),
 ]
 
 # Signatures for the via-SSRF response classifier + role-creds flows. AWS and
@@ -434,6 +449,8 @@ _RESPONSE_SIGNATURES: dict[str, tuple[tuple[str, ...], int, str]] = {
     "azure": (("vmId", "subscriptionId", "resourceGroupName", "azEnvironment"), 2, "high"),
     "oracle": (("availabilityDomain", "compartmentId", "region"), 2, "high"),
     "digitalocean": (("droplet_id", "region", "interfaces"), 2, "high"),
+    # Hetzner: YAML-format response; hyphenated keys do not collide with any JSON provider.
+    "hetzner": (("availability-zone:", "instance-id:", "public-ipv4:"), 2, "high"),
 }
 
 
