@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 from scan_primitives import OutOfScopeError
@@ -94,6 +94,10 @@ SERVICE_BANNERS: tuple[str, ...] = (
     "<html", "<!DOCTYPE", "<!doctype",
 )
 
+# Pre-lowered banner strings: computed once at import time so _match_banner
+# avoids calling banner.lower() on every probe response.
+_SERVICE_BANNERS_LOWER: tuple[str, ...] = tuple(b.lower() for b in SERVICE_BANNERS)
+
 # Timeout value (seconds) used as a sentinel for the FILTERED classification.
 # The underlying ScanClient may use a shorter timeout; if the probe completes
 # at or beyond this threshold we treat it as filtered/unreachable.
@@ -130,8 +134,8 @@ def _match_banner(body: str) -> str | None:
     R5: pure substring search on response data — no code evaluation.
     """
     lbody = body.lower()
-    for banner in SERVICE_BANNERS:
-        if banner.lower() in lbody:
+    for banner, banner_lower in zip(SERVICE_BANNERS, _SERVICE_BANNERS_LOWER):
+        if banner_lower in lbody:
             return banner
     return None
 
@@ -251,11 +255,8 @@ async def scan_ports(
                 resp = await client.request(method, req_url, headers=headers or None, content=body)
             status_code = resp.status_code
             body_text = resp.text
-        except OutOfScopeError:
-            # Payload steered request out of scope — treat as filtered.
-            elapsed = time.monotonic() - t0
-            return PortProbe(port=port, state=PortState.FILTERED, elapsed=elapsed)
-        except asyncio.TimeoutError:
+        except (OutOfScopeError, asyncio.TimeoutError):
+            # Out-of-scope payload or timed-out probe — both indicate filtered.
             elapsed = time.monotonic() - t0
             return PortProbe(port=port, state=PortState.FILTERED, elapsed=elapsed)
         except Exception:

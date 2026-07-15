@@ -63,6 +63,17 @@ __all__ = [
     "file_recon",
 ]
 
+
+def _match_sigs(
+    text: str, sigs: tuple[str, ...], min_hits: int
+) -> tuple[str, ...] | None:
+    """Return the matched subset of ``sigs`` present in ``text``, or None if below threshold.
+
+    Shared helper used by every protocol detector. R5: data-only substring match.
+    """
+    matched = tuple(s for s in sigs if s in text)
+    return matched if len(matched) >= min_hits else None
+
 # --------------------------------------------------------------------------- #
 # gopher:// payload generator (pure byte encoders)
 # --------------------------------------------------------------------------- #
@@ -281,8 +292,7 @@ def detect_ldap_response(text: str) -> tuple[str, ...] | None:
     At least two LDIF attribute names must be present to distinguish a real LDAP
     Root DSE response from a generic HTTP error. R5: data-only substring match.
     """
-    matched = tuple(s for s in LDAP_SIGNATURES if s in text)
-    return matched if len(matched) >= _LDAP_MIN_HITS else None
+    return _match_sigs(text, LDAP_SIGNATURES, _LDAP_MIN_HITS)
 
 
 async def ldap_recon(
@@ -400,10 +410,8 @@ def detect_tftp_response(text: str, *, filename: str = "/etc/passwd") -> tuple[s
     """
     for fname, _label, sigs, min_hits in TFTP_PROBE_FILES:
         if fname == filename:
-            matched = tuple(s for s in sigs if s in text)
-            return matched if len(matched) >= min_hits else None
-    matched = tuple(s for s in TFTP_SIGNATURES if s in text)
-    return matched if len(matched) >= _TFTP_MIN_HITS else None
+            return _match_sigs(text, sigs, min_hits)
+    return _match_sigs(text, TFTP_SIGNATURES, _TFTP_MIN_HITS)
 
 
 async def tftp_recon(
@@ -526,8 +534,7 @@ def detect_file_response(text: str, *, path: str) -> tuple[str, ...] | None:
     R5: ``text`` is untrusted response content; only substring-matched, never evaluated.
     """
     sigs = _FILE_SIGNATURES.get(path, _FILE_SIGNATURES["/etc/passwd"])
-    matched = tuple(s for s in sigs if s in text)
-    return matched if len(matched) >= _FILE_MIN_HITS else None
+    return _match_sigs(text, sigs, _FILE_MIN_HITS)
 
 
 async def file_recon(
