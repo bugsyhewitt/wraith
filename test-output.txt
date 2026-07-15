@@ -1,5 +1,20 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.5, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/xil/dev/necromancer/worktrees/wraith-lap-20260715T090000Z
+configfile: pyproject.toml
+testpaths: tests
+plugins: respx-0.23.1, anyio-4.14.1, pytest_httpserver-1.1.5, socket-0.8.0
 ........................................................................ [ 28%]
-........................................................................ [ 57%]
-........................................................................ [ 86%]
-.................................                                        [100%]
-249 passed, 5 deselected in 12.63s
+........................................................................ [ 56%]
+........................................................................ [ 84%]
+........................................                                 [100%]
+256 passed, 5 deselected in 14.46s
+
+New tests added (7): 249 → 256
+  test_target_file_basic_scan                           PASSED
+  test_target_file_multi_url_deduplicates               PASSED
+  test_target_file_skips_comments_and_blanks            PASSED
+  test_target_file_empty_raises_systemexit              PASSED
+  test_target_file_missing_file_raises_systemexit       PASSED
+  test_target_file_and_request_file_are_mutually_exclusive  PASSED
+  test_scan_no_input_returns_2                          PASSED

@@ -18,7 +18,7 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.8. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.9. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
@@ -117,7 +117,7 @@ wraith is organized into subcommands: `scan` (detect + confirm), `dict`
 (read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.7.0
+wraith --version          # -> wraith 0.9.0
 wraith --help             # subcommand overview
 ```
 
@@ -136,10 +136,17 @@ wraith scan -u "https://app.example.com/proxy?url=FUZZ" --marker FUZZ \
 
 # Raw HTTP request file (SSRFmap parity), injection point named by param
 wraith scan -r request.txt --param url --oob https://oob.example.net --mcp
+
+# Batch scan: newline-delimited file of target URLs (v0.9)
+wraith scan --target-file targets.txt --cloud-metadata --scope-file scope.txt
 ```
 
 - `-u/--target URL` &mdash; target URL to test.
 - `-r/--request-file FILE` &mdash; raw HTTP request to replay (SSRFmap parity).
+- `--target-file FILE` &mdash; newline-delimited file of target URLs to scan in
+  sequence (v0.9). Each URL must contain the injection marker. Blank lines and
+  `#` comment lines are ignored. Findings are accumulated and deduplicated
+  across all targets before output. Cannot be combined with `-r/--request-file`.
 - `--marker STR` &mdash; token in the URL/request that wraith replaces with each
   payload variant (default `FUZZ`).
 - `--param NAME` &mdash; explicitly mark the injection point (query param,
@@ -163,6 +170,23 @@ wraith scan -r request.txt --param url --oob https://oob.example.net --mcp
   bypass class, placed first in the mutator ordering. Use when the target's
   filter only checks the outer URL's domain.
 - `--format {json,text,h1md,sarif}` &mdash; finding output format.
+
+#### `--target-file` format
+
+A plain-text file, one URL per line. `#` comments and blank lines are skipped.
+Every URL must already contain the injection marker (default `FUZZ`):
+
+```
+# Production endpoints
+https://api.example.com/proxy?url=FUZZ
+https://api.example.com/fetch?src=FUZZ
+
+# Staging
+https://staging.example.com/webhook?callback=FUZZ
+```
+
+Pass it with `--target-file targets.txt`. wraith runs the full scan engine
+against each URL and emits a single deduplicated findings list at the end.
 
 ### `wraith dict` -- dict:// read-only recon
 
@@ -433,9 +457,13 @@ confirmed; read-only by nature. v0.8 adds **open-redirect chaining**
 available, wraith generates three bypass variants (raw, URL-encoded,
 double-encoded) for each internal SSRF target and places them at the head of
 the mutator ordering. Bypasses domain-allowlist filters that only check the
-outer URL's hostname.
+outer URL's hostname. v0.9 adds **`--target-file` multi-target scanning**:
+pass a newline-delimited file of target URLs to `wraith scan` and wraith runs
+the full scan engine against each one in sequence, accumulating and
+deduplicating findings before emitting the combined result. Blank lines and `#`
+comments are ignored. Cannot be combined with `-r/--request-file`.
 
-The following remain **deferred** post-v0.8:
+The following remain **deferred** post-v0.9:
 
 - **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
   modules for more capable post-exploitation.

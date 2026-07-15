@@ -52,6 +52,18 @@ def _add_target_group(sub: argparse.ArgumentParser) -> None:
         help="raw HTTP request file to replay (SSRFmap parity)",
     )
     group.add_argument(
+        "--target-file",
+        metavar="FILE",
+        dest="target_file",
+        default=None,
+        help=(
+            "newline-delimited file of target URLs to scan in sequence "
+            "(one URL per line, '#' comments and blank lines ignored). "
+            "Each URL must contain the injection marker (default: FUZZ). "
+            "Cannot be combined with -r/--request-file."
+        ),
+    )
+    group.add_argument(
         "--marker",
         metavar="STR",
         default="FUZZ",
@@ -584,72 +596,148 @@ def _build_collaborator(oob_url: str | None):
     return InteractshClient(InteractshConfig(server=oob_url))
 
 
-def _cmd_scan(args: argparse.Namespace) -> int:
-    """Detect + confirm SSRF (criteria #1-#4, #6)."""
-    import asyncio
+def _read_target_file(path: str) -> list[str]:
+    """Read a newline-delimited URL list from *path*.
+
+    Strips blank lines and lines whose first non-whitespace character is ``#``
+    (comments). Returns the remaining stripped lines as a list of URL strings.
+
+    Raises:
+        SystemExit(2): if the file cannot be opened or contains no valid URLs.
+    """
     import sys
+
+    try:
+        raw = open(path).read()  # noqa: WPS515  (context-manager would bloat this helper)
+    except OSError as exc:
+        print(f"error: cannot open --target-file {path!r}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    urls = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not urls:
+        print(
+            f"error: --target-file {path!r} contains no target URLs (only comments or blanks)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return urls
+
+
+def _run_single_scan(
+    target,
+    scope,
+    *,
+    args,
+    collaborator,
+) -> list:
+    """Run a complete scan (engine + optional MCP catalog) for one *target*.
+
+    Factored out of ``_cmd_scan`` so the multi-target loop can call it without
+    repeating the try/finally around the collaborator (which is shared across
+    all targets in a ``--target-file`` run).
+    """
+    import asyncio
     from urllib.parse import urlsplit
 
-    from wraith.engine import Target, run_scan
+    from wraith.engine import run_scan
     from wraith.mcp import scan_mcp
 
-    if not args.target and not args.request_file:
-        print("error: one of -u/--target or -r/--request-file is required", file=sys.stderr)
+    core_findings = asyncio.run(
+        run_scan(
+            target,
+            scope,
+            rate_limit=args.rate_limit,
+            proxy=args.proxy,
+            concurrency=args.concurrency,
+            cloud_metadata=args.cloud_metadata,
+            collaborator=collaborator,
+            mcp_discovery=bool(args.mcp),
+            mcp_discovery_host=getattr(args, "mcp_host", "127.0.0.1"),
+            mcp_discovery_port=getattr(args, "mcp_port", None),
+            redirect_url=getattr(args, "redirect_url", None),
+        )
+    )
+    if args.mcp:
+        parts = urlsplit(target.url)
+        base = f"{parts.scheme}://{parts.netloc}"
+        mcp_findings = asyncio.run(
+            scan_mcp(
+                base,
+                scope,
+                collaborator=collaborator,
+                cloud_metadata=args.cloud_metadata,
+                concurrency=args.concurrency,
+            )
+        )
+        seen = {f.id for f in core_findings}
+        return core_findings + [f for f in mcp_findings if f.id not in seen]
+    return core_findings
+
+
+def _cmd_scan(args: argparse.Namespace) -> int:
+    """Detect + confirm SSRF (criteria #1-#4, #6).
+
+    Supports three input modes:
+    - ``-u URL``            single target URL
+    - ``-r FILE``           raw HTTP request file (SSRFmap parity)
+    - ``--target-file FILE`` newline-delimited list of target URLs (v0.9)
+    """
+    import sys
+
+    from wraith.engine import Target
+
+    # --- Validate mutually exclusive input options -------------------------
+    target_file = getattr(args, "target_file", None)
+    if target_file and args.request_file:
+        print(
+            "error: --target-file and -r/--request-file are mutually exclusive",
+            file=sys.stderr,
+        )
         return 2
+    if not args.target and not args.request_file and not target_file:
+        print(
+            "error: one of -u/--target, -r/--request-file, or --target-file is required",
+            file=sys.stderr,
+        )
+        return 2
+
     scope = _load_scope_or_exit(args.scope_file)
     if scope is None:
         return 2
 
-    if args.request_file:
-        target = Target.from_request_file(
-            args.request_file, marker=args.marker, param=args.param
-        )
+    # --- Build target list ------------------------------------------------
+    if target_file:
+        urls = _read_target_file(target_file)
+        targets = [
+            Target.from_url(url, marker=args.marker, param=args.param) for url in urls
+        ]
+    elif args.request_file:
+        targets = [
+            Target.from_request_file(
+                args.request_file, marker=args.marker, param=args.param
+            )
+        ]
     else:
-        target = Target.from_url(args.target, marker=args.marker, param=args.param)
+        targets = [Target.from_url(args.target, marker=args.marker, param=args.param)]
 
     collaborator = _build_collaborator(args.oob)
     try:
-        # Always run the core engine (mutator + OOB + metadata + MCP discovery).
-        # When --mcp is set, also enable internal MCP server discovery probing.
-        core_findings = asyncio.run(
-            run_scan(
-                target,
-                scope,
-                rate_limit=args.rate_limit,
-                proxy=args.proxy,
-                concurrency=args.concurrency,
-                cloud_metadata=args.cloud_metadata,
-                collaborator=collaborator,
-                mcp_discovery=bool(args.mcp),
-                mcp_discovery_host=getattr(args, "mcp_host", "127.0.0.1"),
-                mcp_discovery_port=getattr(args, "mcp_port", None),
-                redirect_url=getattr(args, "redirect_url", None),
-            )
-        )
-        # When --mcp is set, also run the CVE-based MCP catalog against the
-        # target as an MCP server (original --mcp behavior: tests the target's
-        # own MCP endpoints for SSRF sinks). Merge results.
-        if args.mcp:
-            parts = urlsplit(target.url)
-            base = f"{parts.scheme}://{parts.netloc}"
-            mcp_findings = asyncio.run(
-                scan_mcp(
-                    base,
-                    scope,
-                    collaborator=collaborator,
-                    cloud_metadata=args.cloud_metadata,
-                    concurrency=args.concurrency,
-                )
-            )
-            seen = {f.id for f in core_findings}
-            findings = core_findings + [f for f in mcp_findings if f.id not in seen]
-        else:
-            findings = core_findings
+        all_findings: list = []
+        seen_ids: set[str] = set()
+        for target in targets:
+            for finding in _run_single_scan(target, scope, args=args, collaborator=collaborator):
+                if finding.id not in seen_ids:
+                    all_findings.append(finding)
+                    seen_ids.add(finding.id)
     finally:
         if collaborator is not None:
             collaborator.close()
 
-    _emit(findings, args.output_format)
+    _emit(all_findings, args.output_format)
     return 0
 
 
