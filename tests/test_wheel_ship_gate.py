@@ -48,8 +48,8 @@ def test_wheel_builds_cleanly(tmp_path):
         [sys.executable, "-m", "build", "--wheel", "--sdist", "--outdir", str(out)],
         cwd=REPO_ROOT,
     )
-    wheels = list(out.glob("wraith-0.5.0-*.whl"))
-    sdists = list(out.glob("wraith-0.5.0.tar.gz"))
+    wheels = list(out.glob("wraith-0.6.0-*.whl"))
+    sdists = list(out.glob("wraith-0.6.0.tar.gz"))
     assert wheels, f"wheel not built; got: {list(out.iterdir())}"
     assert sdists, f"sdist not built; got: {list(out.iterdir())}"
     test_wheel_builds_cleanly._wheel = wheels[0]
@@ -80,7 +80,7 @@ def test_wheel_installs_into_fresh_venv(tmp_path):
 
     cli = venv_dir / "bin" / "wraith"
     version_out = _run([str(cli), "--version"]).stdout.strip()
-    assert version_out == "wraith 0.5.0", f"unexpected --version output: {version_out!r}"
+    assert version_out == "wraith 0.6.0", f"unexpected --version output: {version_out!r}"
 
     test_wheel_installs_into_fresh_venv._venv_dir = venv_dir
 
@@ -93,7 +93,7 @@ def test_wheel_version_importable_in_fresh_venv(tmp_path):
         pytest.skip("preceding install test did not build a venv")
 
     py = venv_dir / "bin" / "python"
-    _run([str(py), "-c", "import wraith; assert wraith.__version__ == '0.5.0'"])
+    _run([str(py), "-c", "import wraith; assert wraith.__version__ == '0.6.0'"])
 
 
 @pytest.mark.ship_gate
@@ -107,7 +107,7 @@ def test_installed_wheel_public_api(tmp_path):
     check_script = (
         "import wraith, wraith.cli, wraith.findings, wraith.sarif, "
         "wraith.reporting, wraith.client, wraith.mutators, wraith.metadata, "
-        "wraith.oob, wraith.engine, wraith.protocols, wraith.mcp; "
+        "wraith.oob, wraith.engine, wraith.protocols, wraith.mcp, wraith.portscan; "
         "from wraith.findings import Finding, SEVERITIES, CONFIDENCES; "
         "from wraith.sarif import to_sarif; "
         "from wraith.reporting import to_h1md; "
