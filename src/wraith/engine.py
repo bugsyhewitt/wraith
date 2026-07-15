@@ -22,14 +22,13 @@ evidence, never evaluated.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from scan_primitives import OutOfScopeError
 
 from wraith.client import ScanClient, get_client
-from wraith.findings import CWE_SSRF, Finding
+from wraith.findings import CWE_SSRF, Finding, _finding_id as _fid
 from wraith.metadata import detect_from_response
 from wraith.mcp import detect_mcp_server_response, mcp_ssrf_urls
 from wraith.mutators import Variant, build_variants
@@ -177,10 +176,6 @@ def parse_http_request(
 # --------------------------------------------------------------------------- #
 # Finding builders
 # --------------------------------------------------------------------------- #
-
-def _fid(*parts: str) -> str:
-    return "wraith-" + hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
-
 
 def _signature_finding(
     target: Target, variant: Variant, provider: str, matched: tuple[str, ...], severity: str

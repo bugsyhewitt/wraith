@@ -621,9 +621,9 @@ def _read_target_file(path: str) -> list[str]:
         raise SystemExit(2) from exc
 
     urls = [
-        line.strip()
+        s
         for line in raw.splitlines()
-        if line.strip() and not line.strip().startswith("#")
+        if (s := line.strip()) and not s.startswith("#")
     ]
     if not urls:
         print(
@@ -681,8 +681,8 @@ def _run_single_scan(
                 concurrency=args.concurrency,
             )
         )
-        seen = {f.id for f in core_findings}
-        return core_findings + [f for f in mcp_findings if f.id not in seen]
+        # Deduplication is handled by the outer loop in _cmd_scan; just combine.
+        return core_findings + mcp_findings
     return core_findings
 
 
@@ -813,16 +813,21 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         )
     elif args.scheme == "tftp":
         port = args.port or 69
-        files = tuple(f.strip() for f in args.tftp_files.split(",") if f.strip())
+        files = _split_csv(args.tftp_files)
         findings = asyncio.run(
             tftp_recon(target, scope, host=args.host, port=port, files=files)
         )
     else:  # file
-        paths = tuple(f.strip() for f in args.file_paths.split(",") if f.strip())
+        paths = _split_csv(args.file_paths)
         findings = asyncio.run(file_recon(target, scope, paths=paths))
 
     _emit(findings, "text")
     return 0
+
+
+def _split_csv(s: str) -> tuple[str, ...]:
+    """Split a comma-separated string, stripping whitespace and dropping blanks."""
+    return tuple(item.strip() for item in s.split(",") if item.strip())
 
 
 def _parse_ports(ports_arg: str) -> tuple[int, ...]:

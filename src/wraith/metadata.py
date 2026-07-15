@@ -33,14 +33,13 @@ Two probe shapes are provided:
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 
 import httpx
 from scan_primitives import OutOfScopeError
 
 from wraith.client import Response, ScanClient
-from wraith.findings import CWE_SSRF, Finding
+from wraith.findings import CWE_SSRF, CWE_SSRF_REF, Finding, _finding_id
 
 __all__ = [
     "MetadataProbe",
@@ -68,7 +67,7 @@ DEFAULT_TOKEN_TTL = 21600
 AZURE_MI_PATH = "/metadata/identity/oauth2/token"
 AZURE_MI_QUERY = "api-version=2018-02-01&resource=https://management.azure.com/"
 
-_CWE_REF = "https://cwe.mitre.org/data/definitions/918.html"
+_CWE_REF = CWE_SSRF_REF  # canonical reference from findings; kept as alias for CATALOG entries
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,11 +227,6 @@ _SECRET_MARKERS = (
 _TITLE_LABELS: dict[str, str] = {
     "azure-managed-identity": "Azure managed-identity credential",
 }
-
-
-def _finding_id(*parts: str) -> str:
-    digest = hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
-    return f"wraith-{digest}"
 
 
 def _redact_evidence(text: str, matched: tuple[str, ...]) -> str:

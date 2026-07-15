@@ -30,6 +30,7 @@ suite adapters: :mod:`wraith.sarif` (SARIF 2.1.0) and :mod:`wraith.reporting`
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -47,6 +48,19 @@ Confidence = Literal["low", "medium", "high"]
 
 # CWE anchor for Server-Side Request Forgery -- the wraith default.
 CWE_SSRF = 918
+
+# Canonical reference URL for CWE-918 — use instead of inlining the string.
+CWE_SSRF_REF = "https://cwe.mitre.org/data/definitions/918.html"
+
+
+def _finding_id(*parts: str) -> str:
+    """Stable short ID shared across wraith modules: ``wraith-<10-hex-sha1>``.
+
+    Canonical implementation so engine, metadata, and portscan all produce
+    IDs with the same algorithm. Parts are pipe-joined before hashing so
+    ``_finding_id("a", "b")`` never collides with ``_finding_id("a|b")``.
+    """
+    return "wraith-" + hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
 
 
 def _now_iso() -> str:
