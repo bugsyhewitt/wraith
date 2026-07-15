@@ -9,6 +9,7 @@ each output format.
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from werkzeug.wrappers import Response as WZResponse
@@ -34,7 +35,7 @@ def test_version(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
-    assert capsys.readouterr().out.strip() == "wraith 0.9.0"
+    assert capsys.readouterr().out.strip() == "wraith 0.9.1"
 
 
 def test_no_subcommand_returns_2(capsys):
@@ -246,3 +247,77 @@ def test_scan_no_input_returns_2(tmp_path, capsys):
     rc = main(["scan", "--scope-file", str(scope)])
     assert rc == 2
     assert "required" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# --timeout: per-request timeout for wraith scan (v0.9.1)
+# --------------------------------------------------------------------------- #
+
+def test_scan_default_timeout_is_ten_seconds():
+    """scan --timeout default is 10.0 seconds as documented."""
+    parser = build_parser()
+    args = parser.parse_args(
+        ["scan", "-u", "http://127.0.0.1/proxy?url=FUZZ", "--scope-file", "scope.txt"]
+    )
+    assert args.timeout == 10.0
+
+
+def test_scan_custom_timeout_accepted():
+    """--timeout accepts a float value and stores it on the namespace."""
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "scan",
+            "-u", "http://127.0.0.1/proxy?url=FUZZ",
+            "--scope-file", "scope.txt",
+            "--timeout", "30.0",
+        ]
+    )
+    assert args.timeout == 30.0
+
+
+def test_scan_timeout_passed_to_run_scan(scope_file, capsys):
+    """--timeout is threaded through to run_scan's timeout kwarg."""
+    captured: list[float] = []
+
+    async def _fake_run_scan(target, scope, **kwargs):
+        captured.append(kwargs.get("timeout", -1.0))
+        return []
+
+    with patch("wraith.engine.run_scan", side_effect=_fake_run_scan):
+        rc = main(
+            [
+                "scan",
+                "-u", "http://127.0.0.1/proxy?url=FUZZ",
+                "--scope-file", scope_file,
+                "--timeout", "42.5",
+            ]
+        )
+    assert rc == 0
+    assert captured, "run_scan was never called"
+    assert captured[0] == pytest.approx(42.5), (
+        f"timeout passed to run_scan was {captured[0]}, expected 42.5"
+    )
+
+
+def test_scan_default_timeout_reaches_run_scan(scope_file, capsys):
+    """When --timeout is omitted, run_scan receives the 10.0-second default."""
+    captured: list[float] = []
+
+    async def _fake_run_scan(target, scope, **kwargs):
+        captured.append(kwargs.get("timeout", -1.0))
+        return []
+
+    with patch("wraith.engine.run_scan", side_effect=_fake_run_scan):
+        rc = main(
+            [
+                "scan",
+                "-u", "http://127.0.0.1/proxy?url=FUZZ",
+                "--scope-file", scope_file,
+            ]
+        )
+    assert rc == 0
+    assert captured, "run_scan was never called"
+    assert captured[0] == pytest.approx(10.0), (
+        f"default timeout passed to run_scan was {captured[0]}, expected 10.0"
+    )

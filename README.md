@@ -18,7 +18,7 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.9. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.9.1. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
@@ -117,7 +117,7 @@ wraith is organized into subcommands: `scan` (detect + confirm), `dict`
 (read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.9.0
+wraith --version          # -> wraith 0.9.1
 wraith --help             # subcommand overview
 ```
 
@@ -169,6 +169,10 @@ wraith scan --target-file targets.txt --cloud-metadata --scope-file scope.txt
   (raw, URL-encoded, double-encoded) per internal target — the highest-priority
   bypass class, placed first in the mutator ordering. Use when the target's
   filter only checks the outer URL's domain.
+- `--timeout SECS` &mdash; per-request timeout in seconds (default: `10.0`). Tune
+  upward for slow targets (e.g. a 30-second timeout for a target that fetches
+  internal URLs asynchronously before responding) or downward to speed up scans
+  against fast infrastructure.
 - `--format {json,text,h1md,sarif}` &mdash; finding output format.
 
 #### `--target-file` format
@@ -461,7 +465,10 @@ outer URL's hostname. v0.9 adds **`--target-file` multi-target scanning**:
 pass a newline-delimited file of target URLs to `wraith scan` and wraith runs
 the full scan engine against each one in sequence, accumulating and
 deduplicating findings before emitting the combined result. Blank lines and `#`
-comments are ignored. Cannot be combined with `-r/--request-file`.
+comments are ignored. Cannot be combined with `-r/--request-file`. v0.9.1 adds
+**`--timeout` for `wraith scan`**: expose the per-request timeout (previously
+hardcoded at 10 s) so operators can tune it upward for slow internal targets or
+downward for fast infrastructure.
 
 The following remain **deferred** post-v0.9:
 
