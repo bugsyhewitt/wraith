@@ -131,7 +131,30 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--mcp",
         action="store_true",
-        help="include the MCP / AI-infra SSRF detection catalog (criteria #6)",
+        help=(
+            "enable MCP / AI-infra detection: (1) probe the target's SSRF injection "
+            "point for internal MCP servers at well-known discovery paths "
+            "(/mcp, /__mcp, /.well-known/mcp.json, …) and (2) run the 5-CVE "
+            "MCP catalog against the target as an MCP server endpoint (criteria #6)"
+        ),
+    )
+    scan.add_argument(
+        "--mcp-host",
+        metavar="HOST",
+        dest="mcp_host",
+        default="127.0.0.1",
+        help=(
+            "internal host to probe for MCP servers via SSRF discovery (default: 127.0.0.1). "
+            "Used with --mcp; set to a known internal host/IP if 127.0.0.1 is not the target."
+        ),
+    )
+    scan.add_argument(
+        "--mcp-port",
+        metavar="PORT",
+        dest="mcp_port",
+        type=int,
+        default=None,
+        help="TCP port for --mcp-host MCP server discovery (default: no port specified)",
     )
     scan.add_argument(
         "--concurrency",
@@ -431,10 +454,29 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     collaborator = _build_collaborator(args.oob)
     try:
+        # Always run the core engine (mutator + OOB + metadata + MCP discovery).
+        # When --mcp is set, also enable internal MCP server discovery probing.
+        core_findings = asyncio.run(
+            run_scan(
+                target,
+                scope,
+                rate_limit=args.rate_limit,
+                proxy=args.proxy,
+                concurrency=args.concurrency,
+                cloud_metadata=args.cloud_metadata,
+                collaborator=collaborator,
+                mcp_discovery=bool(args.mcp),
+                mcp_discovery_host=getattr(args, "mcp_host", "127.0.0.1"),
+                mcp_discovery_port=getattr(args, "mcp_port", None),
+            )
+        )
+        # When --mcp is set, also run the CVE-based MCP catalog against the
+        # target as an MCP server (original --mcp behavior: tests the target's
+        # own MCP endpoints for SSRF sinks). Merge results.
         if args.mcp:
             parts = urlsplit(target.url)
             base = f"{parts.scheme}://{parts.netloc}"
-            findings = asyncio.run(
+            mcp_findings = asyncio.run(
                 scan_mcp(
                     base,
                     scope,
@@ -443,18 +485,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                     concurrency=args.concurrency,
                 )
             )
+            seen = {f.id for f in core_findings}
+            findings = core_findings + [f for f in mcp_findings if f.id not in seen]
         else:
-            findings = asyncio.run(
-                run_scan(
-                    target,
-                    scope,
-                    rate_limit=args.rate_limit,
-                    proxy=args.proxy,
-                    concurrency=args.concurrency,
-                    cloud_metadata=args.cloud_metadata,
-                    collaborator=collaborator,
-                )
-            )
+            findings = core_findings
     finally:
         if collaborator is not None:
             collaborator.close()

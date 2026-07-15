@@ -18,14 +18,17 @@ findings. It does not execute code, change target state, use harvested
 credentials, or open a reverse shell. Weaponization is a deferred, gated v0.2
 concern (see [Roadmap](#roadmap)).
 
-> **Status:** v0.2. v0.1 shipped the detection + confirmation engine (the
+> **Status:** v0.3. v0.1 shipped the detection + confirmation engine (the
 > filter-bypass mutator catalog, cloud-metadata probes, OOB confirmation, dict://
 > recon, gopher:// generator, and MCP catalog). v0.2 adds weaponized gopher://
 > exploitation behind an explicit `--exploit` gate (see
-> [Exploit Mode](#exploit-mode-v02)). Every request routes through the shared
-> `scan-primitives` scope-enforced client. See
-> [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the v0.1 build contract and
-> [`RESEARCH.md`](RESEARCH.md) for the niche brief.
+> [Exploit Mode](#exploit-mode-v02)). v0.3 adds **MCP internal-SSRF discovery**:
+> `--mcp` now also probes the target's SSRF injection point to reach internal
+> MCP servers at well-known discovery paths (`/mcp`, `/__mcp`,
+> `/.well-known/mcp.json`, etc.) and classifies responses for MCP protocol
+> signatures. Every request routes through the shared `scan-primitives`
+> scope-enforced client. See [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md) for the
+> v0.1 build contract and [`RESEARCH.md`](RESEARCH.md) for the niche brief.
 
 ## Ethical Use
 
@@ -86,7 +89,7 @@ wraith is organized into subcommands: `scan` (detect + confirm), `dict`
 (read-only recon), and `gopher` (payload generator).
 
 ```bash
-wraith --version          # -> wraith 0.2.0
+wraith --version          # -> wraith 0.3.0
 wraith --help             # subcommand overview
 ```
 
@@ -116,7 +119,14 @@ wraith scan -r request.txt --param url --oob https://oob.example.net --mcp
 - `--cloud-metadata` &mdash; run the cloud-metadata detection probes.
 - `--oob COLLAB_URL` &mdash; interactsh-compatible OOB collaborator for
   blind-SSRF confirmation (a DNS-only callback still counts as CONFIRMED).
-- `--mcp` &mdash; include the MCP / AI-infra SSRF detection catalog.
+- `--mcp` &mdash; enable MCP detection in two modes: (1) probe the SSRF injection
+  point for internal MCP servers at well-known discovery paths (`/mcp`, `/__mcp`,
+  `/.well-known/mcp.json`, `/api/mcp`, `/v1/mcp`, …) and classify echoed
+  responses for MCP protocol signatures; (2) run the 5-CVE MCP catalog against
+  the target itself as an MCP server endpoint.
+- `--mcp-host HOST` &mdash; internal host to probe for MCP servers via SSRF
+  discovery (default: `127.0.0.1`).
+- `--mcp-port PORT` &mdash; TCP port for `--mcp-host` (default: omitted).
 - `--format {json,text,h1md,sarif}` &mdash; finding output format.
 
 ### `wraith dict` -- dict:// read-only recon
@@ -254,7 +264,7 @@ prompt exists to prevent accidental use.
 | `wraith.oob` | OOB confirmation: local dnslib+HTTP collaborator + interactsh-compatible client. | implemented |
 | `wraith.engine` | Scan orchestration: request-file parsing, injection, concurrent detect/confirm. | implemented |
 | `wraith.protocols` | `dict://` recon + `gopher://` payload generator (RESP / FastCGI). | implemented |
-| `wraith.mcp` | Version-gated MCP / AI-infra SSRF catalog (5 signatures). | implemented |
+| `wraith.mcp` | Version-gated MCP / AI-infra SSRF catalog (5 signatures) + internal MCP server discovery via SSRF (`detect_mcp_server_response`, `mcp_ssrf_urls`). | implemented |
 | `wraith.cli` | argparse CLI: `scan` / `dict` / `gopher` / `exploit`. | implemented |
 | `wraith.exploit` | Weaponized gopher:// sequences: Redis cron/SSH injection, FastCGI RCE (v0.2, `--exploit` gate). | implemented |
 
@@ -304,8 +314,11 @@ hermetic test tiers described in `V0.1-CRITERIA.md`.
 v0.1 implemented the detection/confirmation engine per
 [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md). v0.2 shipped the weaponized
 `gopher://` exploit sequences (see [Exploit Mode](#exploit-mode-v02)).
+v0.3 added MCP internal-SSRF discovery (`--mcp` now probes the injection
+point for internal MCP servers at well-known paths, not just the target as
+an MCP server).
 
-The following remain **deferred** post-v0.2:
+The following remain **deferred** post-v0.3:
 
 - **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
   modules for more capable post-exploitation.

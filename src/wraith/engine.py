@@ -31,6 +31,7 @@ from scan_primitives import OutOfScopeError
 from wraith.client import ScanClient, get_client
 from wraith.findings import CWE_SSRF, Finding
 from wraith.metadata import detect_from_response
+from wraith.mcp import detect_mcp_server_response, mcp_ssrf_urls
 from wraith.mutators import Variant, build_variants
 from wraith.oob import Canary, Collaborator
 
@@ -199,6 +200,30 @@ def _signature_finding(
     )
 
 
+def _mcp_server_finding(target: Target, variant: Variant, internal_url: str) -> Finding:
+    vector = target.injection.vector()
+    return Finding(
+        id=_fid("mcp-server", internal_url, vector),
+        tool="wraith",
+        title=f"SSRF reaches internal MCP server at {internal_url}",
+        severity="high",
+        confidence="medium",
+        target=target.url,
+        vector=vector,
+        variant=variant.name,
+        cwe_id=CWE_SSRF,
+        evidence={
+            "internal_url": internal_url,
+            "injected_payload": variant.value,
+            "detection": "MCP protocol signatures matched in echoed response",
+        },
+        references=[
+            "https://cwe.mitre.org/data/definitions/918.html",
+            "https://modelcontextprotocol.io/specification",
+        ],
+    )
+
+
 def _oob_finding(target: Target, variant: Variant, canary: Canary, oob_result) -> Finding:
     vector = target.injection.vector()
     flag = " (HTTP egress likely filtered)" if oob_result.http_egress_filtered else ""
@@ -235,6 +260,9 @@ async def run_scan(
     timeout: float = 10.0,
     concurrency: int = 10,
     cloud_metadata: bool = False,
+    mcp_discovery: bool = False,
+    mcp_discovery_host: str = "127.0.0.1",
+    mcp_discovery_port: int | None = None,
     collaborator: Collaborator | None = None,
     extra_targets: list[tuple[str, str]] | None = None,
     client: ScanClient | None = None,
@@ -243,11 +271,19 @@ async def run_scan(
     """Run the SSRF detect+confirm scan and return deduped findings.
 
     Builds internal SSRF targets (an OOB canary if a collaborator is given, plus
-    the cloud-metadata URLs when ``cloud_metadata`` is set, plus any
-    ``extra_targets``), mutates each into the filter-bypass catalog, injects and
-    dispatches every variant concurrently, and classifies responses. Then polls
-    the collaborator for OOB callbacks. ``client`` may be injected (tests);
-    otherwise one is constructed from ``scope``.
+    the cloud-metadata URLs when ``cloud_metadata`` is set, plus MCP server
+    discovery paths when ``mcp_discovery`` is set, plus any ``extra_targets``),
+    mutates each into the filter-bypass catalog, injects and dispatches every
+    variant concurrently, and classifies responses. Then polls the collaborator
+    for OOB callbacks. ``client`` may be injected (tests); otherwise one is
+    constructed from ``scope``.
+
+    Args:
+        mcp_discovery: When True, inject MCP well-known paths at
+            ``mcp_discovery_host``/``mcp_discovery_port`` as internal SSRF
+            targets. Responses are classified by :func:`wraith.mcp.detect_mcp_server_response`.
+        mcp_discovery_host: Internal host to probe for MCP servers (default: 127.0.0.1).
+        mcp_discovery_port: TCP port for the MCP discovery host (default: None → no port).
     """
     # 1) Assemble internal targets: (label, url, canary|None).
     targets: list[tuple[str, str, Canary | None]] = []
@@ -257,6 +293,11 @@ async def run_scan(
         targets.append(("oob-canary", canary.url, canary))
     if cloud_metadata:
         targets += [(f"metadata-{p}", url, None) for p, url in METADATA_SSRF_URLS]
+    if mcp_discovery:
+        targets += [
+            (label, url, None)
+            for label, url in mcp_ssrf_urls(mcp_discovery_host, mcp_discovery_port)
+        ]
     for label, url in extra_targets or []:
         targets.append((label, url, None))
     if not targets:
@@ -264,19 +305,19 @@ async def run_scan(
         # against a loopback baseline so a bare `scan` does something meaningful.
         targets.append(("loopback", "http://127.0.0.1/", None))
 
-    # 2) Build the (variant, canary) work list.
-    work: list[tuple[Variant, Canary | None]] = []
+    # 2) Build the (variant, internal_url, canary) work list.
+    work: list[tuple[Variant, str, Canary | None]] = []
     decoy = target.host or "localhost"
     for _label, url, tgt_canary in targets:
         for variant in build_variants(url, decoy=decoy):
-            work.append((variant, tgt_canary))
+            work.append((variant, url, tgt_canary))
 
     own_client = client is None
     client = client or get_client(scope, rate_limit=rate_limit, proxy=proxy, timeout=timeout)
     sem = asyncio.Semaphore(max(1, concurrency))
     findings: dict[str, Finding] = {}
 
-    async def _dispatch(variant: Variant) -> None:
+    async def _dispatch(variant: Variant, internal_url: str) -> None:
         method, url, headers, body = target.build_request(variant.value)
         try:
             async with sem:
@@ -290,9 +331,12 @@ async def run_scan(
             provider, matched, severity = hit
             f = _signature_finding(target, variant, provider, matched, severity)
             findings.setdefault(f.id, f)
+        if mcp_discovery and detect_mcp_server_response(resp.text):
+            f = _mcp_server_finding(target, variant, internal_url)
+            findings.setdefault(f.id, f)
 
     try:
-        await asyncio.gather(*(_dispatch(v) for v, _c in work))
+        await asyncio.gather(*(_dispatch(v, iu) for v, iu, _c in work))
 
         # 3) OOB confirmation: poll for callbacks against the canary.
         if collaborator is not None and canary is not None:
@@ -300,7 +344,7 @@ async def run_scan(
             if result.confirmed:
                 # Attribute to the first variant that carried the canary URL.
                 variant = next(
-                    (v for v, c in work if c is canary), work[0][0] if work else None
+                    (v for v, _iu, c in work if c is canary), work[0][0] if work else None
                 )
                 if variant is not None:
                     f = _oob_finding(target, variant, canary, result)
