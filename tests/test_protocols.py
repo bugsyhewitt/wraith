@@ -288,3 +288,163 @@ def test_tftp_recon_no_hit(httpserver):
         p.tftp_recon(target, scope, host="127.0.0.1", files=("/etc/passwd",))
     )
     assert findings == []
+
+
+# --------------------------------------------------------------------------- #
+# file:// URL builder + signature detection (Tier-0)
+# --------------------------------------------------------------------------- #
+
+def test_file_url_unix_absolute():
+    assert p.file_url("/etc/passwd") == "file:///etc/passwd"
+    assert p.file_url("/etc/hosts") == "file:///etc/hosts"
+    assert p.file_url("/proc/version") == "file:///proc/version"
+
+
+def test_file_url_windows_path():
+    assert p.file_url("C:/Windows/win.ini") == "file:///C:/Windows/win.ini"
+    assert p.file_url("C:/Windows/System32/drivers/etc/hosts").startswith("file:///C:/")
+
+
+def test_detect_file_response_passwd_hit():
+    body = "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin\n"
+    result = p.detect_file_response(body, path="/etc/passwd")
+    assert result is not None
+    assert len(result) >= 2
+    # R5: raw content was substring-matched, never executed
+    assert "root:" in result or "/bin/" in result
+
+
+def test_detect_file_response_hosts_hit():
+    body = "127.0.0.1\tlocalhost\n::1\tlocalhost\n"
+    result = p.detect_file_response(body, path="/etc/hosts")
+    assert result is not None
+    assert "localhost" in result
+    assert "127.0.0.1" in result
+
+
+def test_detect_file_response_proc_version_hit():
+    body = "Linux version 6.1.0-23-amd64 (debian-kernel@lists.debian.org) (gcc version 12.2.0 (Debian 12.2.0-14), GNU ld (GNU Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC Debian 6.1.99-1 (2024-07-15)"
+    result = p.detect_file_response(body, path="/proc/version")
+    assert result is not None
+    assert "Linux version" in result
+
+
+def test_detect_file_response_miss():
+    # Generic HTTP error — should not trigger
+    assert p.detect_file_response("400 Bad Request\r\nContent-Type: text/html", path="/etc/passwd") is None
+    assert p.detect_file_response("", path="/etc/passwd") is None
+    # Only one signature match — below threshold
+    assert p.detect_file_response("root: something else here", path="/etc/passwd") is None
+
+
+def test_detect_file_response_windows_win_ini_hit():
+    body = "[windows]\nload=\nrun=\n[fonts]\n"
+    result = p.detect_file_response(body, path="C:/Windows/win.ini")
+    assert result is not None
+    assert len(result) >= 2
+
+
+def test_detect_file_response_unknown_path_falls_back_to_passwd_sigs():
+    # Unknown path falls back to /etc/passwd signatures
+    body = "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:/sbin/nologin\n"
+    result = p.detect_file_response(body, path="/etc/custom-unknown")
+    assert result is not None  # falls back to passwd sigs
+
+
+# --------------------------------------------------------------------------- #
+# file:// recon end-to-end (Tier-2 loopback)
+# --------------------------------------------------------------------------- #
+
+_PASSWD_FILE_BODY = (
+    "root:x:0:0:root:/root:/bin/bash\n"
+    "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+    "nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin\n"
+)
+
+_HOSTS_FILE_BODY = (
+    "127.0.0.1\tlocalhost\n"
+    "127.0.1.1\tmyhostname\n"
+    "::1\tlocalhost ip6-localhost\n"
+)
+
+
+def test_file_recon_detects_passwd(httpserver):
+    def handler(request):
+        injected = request.args.get("url", "")
+        if injected.startswith("file:///etc/passwd"):
+            return WZResponse(_PASSWD_FILE_BODY, content_type="text/plain")
+        return WZResponse("")
+
+    httpserver.expect_request("/fetch").respond_with_handler(handler)
+    target = Target.from_url(httpserver.url_for("/fetch"), param="url")
+    scope = Scope.from_entries(["127.0.0.1"])
+
+    findings = asyncio.run(
+        p.file_recon(target, scope, paths=("/etc/passwd",))
+    )
+    assert findings, "no file:// finding produced"
+    f = findings[0]
+    assert f.variant == "file:/etc/passwd"
+    assert f.severity == "critical"
+    assert f.confidence == "high"
+    assert f.cwe_id == 918
+    assert "file:///etc/passwd" in f.evidence["injected_payload"]
+    assert f.evidence["filename"] == "/etc/passwd"
+    # R5: raw passwd content not stored verbatim in banner_signature
+    assert "x:0:0" not in f.evidence.get("banner_signature", "")
+
+
+def test_file_recon_detects_hosts(httpserver):
+    def handler(request):
+        injected = request.args.get("url", "")
+        if injected.startswith("file:///etc/hosts"):
+            return WZResponse(_HOSTS_FILE_BODY, content_type="text/plain")
+        return WZResponse("")
+
+    httpserver.expect_request("/fetch").respond_with_handler(handler)
+    target = Target.from_url(httpserver.url_for("/fetch"), param="url")
+    scope = Scope.from_entries(["127.0.0.1"])
+
+    findings = asyncio.run(
+        p.file_recon(target, scope, paths=("/etc/hosts",))
+    )
+    assert findings, "no hosts file finding produced"
+    f = findings[0]
+    assert f.variant == "file:/etc/hosts"
+    assert f.severity == "critical"
+    assert "file:///etc/hosts" in f.evidence["injected_payload"]
+
+
+def test_file_recon_multiple_paths_emits_multiple_findings(httpserver):
+    def handler(request):
+        injected = request.args.get("url", "")
+        if "etc/passwd" in injected:
+            return WZResponse(_PASSWD_FILE_BODY, content_type="text/plain")
+        if "etc/hosts" in injected:
+            return WZResponse(_HOSTS_FILE_BODY, content_type="text/plain")
+        return WZResponse("")
+
+    httpserver.expect_request("/fetch").respond_with_handler(handler)
+    target = Target.from_url(httpserver.url_for("/fetch"), param="url")
+    scope = Scope.from_entries(["127.0.0.1"])
+
+    findings = asyncio.run(
+        p.file_recon(target, scope, paths=("/etc/passwd", "/etc/hosts"))
+    )
+    assert len(findings) == 2
+    variants = {f.variant for f in findings}
+    assert "file:/etc/passwd" in variants
+    assert "file:/etc/hosts" in variants
+
+
+def test_file_recon_no_hit(httpserver):
+    httpserver.expect_request("/fetch").respond_with_data(
+        "403 Forbidden: file:// scheme not allowed"
+    )
+    target = Target.from_url(httpserver.url_for("/fetch"), param="url")
+    scope = Scope.from_entries(["127.0.0.1"])
+
+    findings = asyncio.run(
+        p.file_recon(target, scope, paths=("/etc/passwd",))
+    )
+    assert findings == []

