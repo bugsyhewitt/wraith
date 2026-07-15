@@ -1,76 +1,73 @@
-# wraith v0.9.0 — Worker Output
+# wraith v0.9.1 — Worker Output
 
 ## Improvement shipped
 
-**`--target-file` multi-target batch scanning**
+**`--timeout` flag for `wraith scan`**
 
 ### What
 
-Added `--target-file FILE` to `wraith scan`. When provided, wraith reads a
-newline-delimited list of target URLs from the file (one per line, `#` comments
-and blank lines ignored), runs the full scan engine against each URL in
-sequence, deduplicates findings by ID across all targets, and emits a single
-combined findings list.
+Added `--timeout SECS` to `wraith scan`. The engine (`wraith.engine.run_scan`)
+has always accepted a `timeout` parameter (default 10.0 s), but the CLI never
+exposed it — it was silently hardcoded. This meant operators scanning slow
+internal targets (e.g. an application that asynchronously fetches internal
+URLs before returning a response) could not extend the timeout, and operators
+on fast infrastructure could not tighten it to accelerate scans.
 
-This enables batch scanning of multiple injection endpoints in a single
-invocation — the common case during a pentest where the target application has
-several URL parameters that accept URLs (a webhook, a proxy, a fetcher, etc.).
+`portscan` already had `--timeout`. This closes the parity gap.
 
 Key behaviors:
-- Blank lines and lines starting with `#` are silently skipped.
-- Fails cleanly (exit 2) if the file cannot be opened or contains no valid URLs.
-- Cannot be combined with `-r/--request-file` (mutually exclusive).
-- Deduplication is by finding `id` — two identical targets that return the same
-  finding only emit it once in the output.
-- Works with all output formats: `json`, `text`, `h1md`, `sarif`.
+
+- Default: `10.0` seconds (unchanged from the prior hardcoded value; no
+  regression for existing users).
+- Accepts any positive float: `--timeout 0.5` (aggressive), `--timeout 60.0`
+  (very slow targets).
+- Threaded through to `run_scan(timeout=...)` via `_run_single_scan()`, which
+  means it applies to every SSRF probe request fired by the scan engine.
+- Works with all input modes: `-u URL`, `-r FILE`, `--target-file FILE`.
 
 ### Files changed
 
 | File | Change |
 |---|---|
-| `src/wraith/cli.py` | Added `--target-file` arg to `_add_target_group()`; added `_read_target_file()` helper; factored `_run_single_scan()` out of `_cmd_scan`; updated `_cmd_scan` to handle multi-target loop with deduplication |
-| `src/wraith/__init__.py` | Version bumped: `0.8.0` → `0.9.0` |
-| `pyproject.toml` | Version bumped: `0.8.0` → `0.9.0` |
-| `README.md` | Updated status line, version in `--version` example, documented `--target-file` in the `wraith scan` section (usage example + parameter description + file format block), updated roadmap |
-| `tests/test_cli.py` | Updated `test_version` to expect `wraith 0.9.0`; added 7 new tests |
+| `src/wraith/cli.py` | Added `--timeout FLOAT` arg to `scan` subparser; passed `timeout=getattr(args, "timeout", 10.0)` to `run_scan()` in `_run_single_scan()` |
+| `src/wraith/__init__.py` | Version bumped: `0.9.0` → `0.9.1` |
+| `pyproject.toml` | Version bumped: `0.9.0` → `0.9.1` |
+| `README.md` | Updated status line and `--version` example; added `--timeout` to the `wraith scan` parameter list; updated Roadmap |
+| `tests/test_cli.py` | Updated `test_version` to expect `wraith 0.9.1`; added 4 new tests |
 
 ### Test results
 
 ```
-256 passed, 5 deselected in ~14s
+260 passed, 5 deselected in ~14s
 ```
 
-7 new tests added (249 → 256). All pass. See `test-output.txt` for full output.
+4 new tests added (256 → 260). All pass. See `test-output.txt` for full output.
 
 ### New tests
 
 | Test | Coverage |
 |---|---|
-| `test_target_file_basic_scan` | Single URL in `--target-file` produces same findings as `-u` (live mock) |
-| `test_target_file_multi_url_deduplicates` | Identical URL listed twice yields no duplicate finding IDs |
-| `test_target_file_skips_comments_and_blanks` | `_read_target_file` unit: only non-comment, non-blank lines returned |
-| `test_target_file_empty_raises_systemexit` | All-comment file exits 2 with "no target URLs" message |
-| `test_target_file_missing_file_raises_systemexit` | Nonexistent file exits 2 with "cannot open" message |
-| `test_target_file_and_request_file_are_mutually_exclusive` | `--target-file` + `-r` → exit 2 "mutually exclusive" |
-| `test_scan_no_input_returns_2` | scan with no `-u`, `-r`, `--target-file` → exit 2 |
+| `test_scan_default_timeout_is_ten_seconds` | Parser default is 10.0 s (no regression) |
+| `test_scan_custom_timeout_accepted` | `--timeout 30.0` is stored on the namespace |
+| `test_scan_timeout_passed_to_run_scan` | `run_scan` receives `timeout=42.5` when `--timeout 42.5` is passed |
+| `test_scan_default_timeout_reaches_run_scan` | `run_scan` receives `timeout=10.0` when `--timeout` is omitted |
 
 ### CLI example
 
 ```bash
-# Create a target file
-cat > targets.txt <<'EOF'
-# Production endpoints
-https://api.example.com/proxy?url=FUZZ
-https://api.example.com/fetch?src=FUZZ
+# Scan a slow target: extend to 30 s so the application has time to
+# fetch the internal URL and return a response.
+wraith scan \
+  -u "https://api.example.com/proxy?url=FUZZ" \
+  --scope-file scope.txt \
+  --cloud-metadata \
+  --timeout 30.0 \
+  --format json
 
-# Staging
-https://staging.example.com/webhook?callback=FUZZ
-EOF
-
-# Scan all three endpoints, emit combined findings as SARIF
+# Scan fast infrastructure: tighten to 2 s to accelerate batch runs.
 wraith scan \
   --target-file targets.txt \
   --scope-file scope.txt \
-  --cloud-metadata \
+  --timeout 2.0 \
   --format sarif > findings.sarif
 ```

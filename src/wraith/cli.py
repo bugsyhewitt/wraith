@@ -197,6 +197,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format for findings (default: json)",
     )
     scan.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        metavar="SECS",
+        help="per-request timeout in seconds (default: 10.0)",
+    )
+    scan.add_argument(
         "--rate-limit",
         type=float,
         dest="rate_limit",
@@ -652,6 +659,7 @@ def _run_single_scan(
             scope,
             rate_limit=args.rate_limit,
             proxy=args.proxy,
+            timeout=getattr(args, "timeout", 10.0),
             concurrency=args.concurrency,
             cloud_metadata=args.cloud_metadata,
             collaborator=collaborator,
