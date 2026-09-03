@@ -18,3 +18,7 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Worker-pattern artifacts (should not be committed)
+output.md
+test-output.txt
