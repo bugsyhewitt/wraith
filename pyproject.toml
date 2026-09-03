@@ -61,3 +61,10 @@ testpaths = ["tests"]
 markers = [
     "ship_gate: v0.1 release ship-gate (slow; runs build + fresh-venv install)",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

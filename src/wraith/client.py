@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 
 import httpx
-from scan_primitives import OutOfScopeError, Scope, ScanClient, load_scope
+from scan_primitives import OutOfScopeError, ScanClient, Scope, load_scope
 
 __all__ = [
     "OutOfScopeError",

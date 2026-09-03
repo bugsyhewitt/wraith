@@ -1,4 +1,6 @@
-"""Protocol modules: ``dict://``, ``ldap://``, ``tftp://``, ``file://`` recon + ``gopher://`` generator.
+"""Protocol modules: ``dict://``, ``ldap://``, ``tftp://``, ``file://`` recon.
+
+Also includes ``gopher://`` generator.
 
 V0.1-CRITERIA.md #5 (base: dict + gopher); v0.4 adds ldap + tftp scheme probes;
 v0.7 adds file:// SSRF detection:
@@ -31,7 +33,6 @@ substring-matched into evidence, never evaluated.
 
 from __future__ import annotations
 
-import asyncio
 from urllib.parse import quote
 
 from wraith.client import ScanClient, get_client

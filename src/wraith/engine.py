@@ -28,9 +28,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from scan_primitives import OutOfScopeError
 
 from wraith.client import ScanClient, get_client
-from wraith.findings import CWE_SSRF, Finding, _finding_id as _fid
-from wraith.metadata import detect_from_response
+from wraith.findings import CWE_SSRF, Finding
+from wraith.findings import _finding_id as _fid
 from wraith.mcp import detect_mcp_server_response, mcp_ssrf_urls
+from wraith.metadata import detect_from_response
 from wraith.mutators import Variant, build_variants
 from wraith.oob import Canary, Collaborator
 
@@ -120,7 +121,12 @@ class Target:
     def build_request(self, payload: str) -> tuple[str, str, dict[str, str], str | None]:
         """Return ``(method, url, headers, body)`` with ``payload`` injected."""
         if self.injection.kind == "query":
-            return self.method, _set_query_param(self.url, self.injection.name, payload), dict(self.headers), self.body
+            return (
+                self.method,
+                _set_query_param(self.url, self.injection.name, payload),
+                dict(self.headers),
+                self.body,
+            )
         # marker: replace the token everywhere it appears.
         token = self.injection.name
         url = self.url.replace(token, payload)
