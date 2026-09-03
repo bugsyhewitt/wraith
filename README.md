@@ -412,6 +412,9 @@ hermetic test tiers described in `V0.1-CRITERIA.md`.
 
 ## Roadmap
 
+Full version history: [`CHANGELOG.md`](CHANGELOG.md). Still-deferred post-v1.0
+items (with safety rationale): [`POST_V01.md`](POST_V01.md).
+
 v0.1 implemented the detection/confirmation engine per
 [`V0.1-CRITERIA.md`](V0.1-CRITERIA.md). v0.2 shipped the weaponized
 `gopher://` exploit sequences (see [Exploit Mode](#exploit-mode-v02)).
