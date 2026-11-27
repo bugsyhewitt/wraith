@@ -369,6 +369,182 @@ prompt exists to prevent accidental use.
 | `wraith.cli` | argparse CLI: `scan` / `dict` / `gopher` / `exploit`. | implemented |
 | `wraith.exploit` | Weaponized gopher:// sequences: Redis cron/SSH injection, FastCGI RCE (v0.2, `--exploit` gate). | implemented |
 
+## Detection methodology
+
+### SSRF detection pipeline
+
+wraith's core scan flow:
+
+1. **Injection point identification** — a marked URL (default marker: `FUZZ`) or
+   a raw HTTP request file specifies where the SSRF injection occurs. The
+   injection point can be a query parameter, path segment, header, or body field.
+2. **Mutator catalog** — `wraith.mutators` generates every filter-bypass variant
+   for the injection point (see [Filter bypass techniques](#filter-bypass-techniques)
+   below). The catalog is ordered so the highest-probability bypasses fire first:
+   open-redirect chains → userinfo `@` → DNS rebind → parser-differential
+   (fragment, backslash, whitespace, CRLF) → IP encodings → scheme variants.
+3. **Concurrent detection** — the engine fires each variant concurrently
+   (configurable with `--concurrency`) against the target and classifies
+   responses: a cloud-metadata response body, an OOB DNS callback, an MCP
+   protocol signature, or a service-banner anomaly each produce a finding.
+4. **Out-of-band confirmation** — blind SSRF (the app does not echo the fetched
+   body) is confirmed via an interactsh-compatible OOB collaborator: wraith
+   embeds a unique canary in each payload, and a DNS callback to that canary
+   proves the server initiated an outbound request. A DNS-only callback is
+   sufficient to emit a CONFIRMED finding.
+5. **Finding emission** — every confirmed hit becomes a suite-standard
+   `wraith.findings.Finding` (CWE-918, lowercase severity, OOB proof if present)
+   exported as JSON, SARIF 2.1.0, or HackerOne markdown.
+
+### Filter bypass techniques
+
+wraith's mutator catalog (`wraith.mutators`) implements seven bypass families,
+in the default injection order:
+
+| Family | Variants | Bypass mechanism |
+|---|---|---|
+| `redirect-chain` | 3 | Embeds the internal target URL inside a trusted-domain open-redirect endpoint. Generated raw, URL-encoded once, and double-encoded. Bypasses allowlists that only check the outer URL's domain. Requires `--redirect-url`. First in the ordering when present. |
+| `userinfo` | 2 | Places the decoy host in the userinfo component (`scheme://decoy@internal/path`) and the multi-`@` split variant. Bypasses parsers that extract the host from before the last `@`. |
+| `dns-rebind` | 1 | Emits an `rbndr.us` hostname that alternates DNS resolution between an external IP and the internal target on successive lookups (emit-only; wraith never hosts the flip itself). Bypasses filters that check the initial DNS resolution but not subsequent ones. Only emitted for IPv4 literal targets. |
+| `parser-differential` | 4 | Fragment hash (`#@decoy`), backslash (`\\@`), whitespace tab (`%09@`), CRLF header injection (`%0d%0aWraith-Canary: 1`). Each exploits inconsistencies between the app's URL validator and its fetcher. |
+| `encoding` | 8–9 (IPv4 only) | dword-decimal, hex dotless, hex dotted, octal dotted, octal dotless, two-part `A.B` shorthand, IPv4-mapped IPv6 (`[::ffff:a.b.c.d]`), IPv4-mapped hex (`[::ffff:XXXX:XXXX]`). IPv6 loopback (`[::1]`) added automatically for loopback targets. Only emitted when the internal target has an IPv4 literal host. |
+| `scheme` | 2 | Case-varied scheme (`HtTp://`) and malformed slash separator (`http:/\/`). Bypasses scheme allowlists that use case-sensitive or slash-exact matching. |
+
+#### Technique notes
+
+**Open-redirect chaining (`--redirect-url`):**
+Pass `--redirect-url "https://trusted.com/redir?next=FUZZ"` when you have a
+known open-redirect endpoint on a trusted domain. wraith generates three
+variants: the internal URL verbatim, URL-encoded once, and URL-encoded twice.
+Any filter that checks only whether the outer URL starts with the trusted domain
+will pass all three; the SSRF sink follows the redirect chain to the internal host.
+
+**Userinfo `@` bypass:**
+`scheme://trusted.example@169.254.169.254/path` — the userinfo component is not
+the host. SSRF filters that call `urllib.parse.urlparse(url).hostname` will see
+`169.254.169.254`. The multi-`@` variant (`scheme://trusted@trusted@169.254.169.254/path`)
+exploits parsers that split on the first `@` versus the last.
+
+**IP encoding bypass:**
+Any valid IPv4 literal can be expressed as a 32-bit decimal integer
+(`169.254.169.254` → `2852039166`), a hex dword (`0xa9fea9fe`), per-octet hex
+(`0xa9.0xfe.0xa9.0xfe`), or several other forms. Linux libc's `inet_aton` and
+most HTTP clients accept all of these; allowlists that only check the dotted-quad
+form do not.
+
+**DNS rebind (emit-only):**
+The `rbndr.us` service alternates DNS resolution between two IPs on successive
+queries. wraith emits the rebind hostname for the operator to inject and observe,
+but never hosts the DNS flip itself — self-hosted DNS rebinding is a deferred
+item (see [Roadmap](#roadmap)).
+
+**CRLF header injection:**
+The `crlf-header-injection` variant appends `%0d%0aWraith-Canary: 1` to the
+injected URL. If the SSRF sink constructs an outbound request using the injected
+value directly in a header value, the CRLF sequence injects an extra header into
+that outbound request. This can smuggle the OOB canary header past a filter that
+checks the URL body but not the headers on the outbound request.
+
+### Cloud metadata probes
+
+`wraith.metadata` implements direct probes and via-SSRF classifiers for 8
+cloud providers. Each probe is read-only: wraith detects credential-shaped
+responses and emits findings; it **never uses harvested credentials** (no SDK
+calls, no signing). Secret bytes (access keys, tokens) are redacted from
+finding evidence.
+
+| Provider | SSRF path | Credential shape | Severity | Notes |
+|---|---|---|---|---|
+| AWS IMDSv1 | `http://169.254.169.254/latest/meta-data/iam/security-credentials/<role>` | `AccessKeyId` + `SecretAccessKey` | critical | Unauthenticated GET; works if IMDSv2 is not enforced. |
+| AWS IMDSv2 | PUT `/latest/api/token` → GET creds with `X-aws-ec2-metadata-token` header | `AccessKeyId` + `SecretAccessKey` | critical | Two-step handshake. wraith does the PUT, then GETs creds with the returned session token. |
+| AWS IMDSv2 header-injection | SSRF that controls request headers can smuggle the token header onto the outbound GET | `AccessKeyId` + `SecretAccessKey` | critical | CVE-2025-64709 (Typebot). The finding labels the `imdsv2-header-injection` variant and cites the CVE. |
+| GCP | `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token` with `Metadata-Flavor: Google` | `access_token` + `token_type` + `expires_in` | critical | GCP tokens must be disambiguated from Azure managed-identity tokens: Azure adds a `resource` field that GCP omits. |
+| Azure instance | `http://169.254.169.254/metadata/instance?api-version=2021-02-01` with `Metadata: true` | `vmId` + `subscriptionId` + `resourceGroupName` | high | Identity metadata, not a harvested credential. wraith deliberately does NOT send `X-Forwarded-For` (Azure IMDS rejects it). |
+| Azure managed identity | `http://169.254.169.254/metadata/identity/oauth2/token?...` with `Metadata: true` | `access_token` + `resource` + `token_type` | critical | Harvested OAuth2 access token for the VM's managed identity. The `resource` field disambiguates from GCP. The classifier checks Azure MI before GCP. |
+| Alibaba | `http://100.100.100.200/latest/meta-data/ram/security-credentials/<role>` | `AccessKeyId` + `AccessKeySecret` + `SecurityToken` | critical | RAM role credentials. `AccessKeySecret` (not `SecretAccessKey`) is the Alibaba-specific discriminator. Alibaba is checked before AWS in the classifier to prevent misidentification. |
+| Oracle | `http://192.0.0.192/opc/v2/instance/` with `Authorization: Bearer Oracle` | `availabilityDomain` + `compartmentId` + `region` | high | Identity metadata only. |
+| DigitalOcean | `http://169.254.169.254/metadata/v1.json` | `droplet_id` + `region` + `interfaces` | high | Unauthenticated JSON endpoint. |
+| Hetzner | `http://169.254.169.254/hetzner/v1/metadata` | `availability-zone:` + `instance-id:` + `public-ipv4:` | high | YAML-format response. Hyphenated YAML keys are distinctive and do not collide with any JSON-format provider. No auth header required. |
+
+#### Classifier ordering and false-positive prevention
+
+The via-SSRF response classifier (`detect_from_response`) processes providers
+in a fixed order to prevent misidentification:
+
+1. **Alibaba before AWS** — Alibaba bodies also carry `AccessKeyId`; checking
+   the 3-marker Alibaba signature first avoids misclassifying Alibaba responses
+   as AWS.
+2. **Azure managed identity before GCP** — both return `access_token` /
+   `token_type` / `expires_in`; Azure MI uniquely adds `resource`, so it must
+   be checked first to avoid mis-labelling a critical Azure credential finding
+   as GCP.
+3. Each provider requires at least 2 of its signatures to match (the `min_hits`
+   threshold), preventing single-substring false positives.
+
+### MCP / AI-infrastructure SSRF
+
+The `--mcp` flag enables two modes:
+
+1. **Catalog mode** — run the 5-CVE MCP catalog against the target itself as an
+   MCP server endpoint (Typebot CVE-2025-64709, Fetch MCP CVE-2025-65513,
+   MCP-Atlassian CVE-2026-27826, LiteLLM, LangChain CVE-2026-26019). Version-
+   gated signatures prevent false positives against patched targets.
+2. **Discovery mode** — probe the SSRF injection point for internal MCP servers
+   at well-known discovery paths (`/mcp`, `/__mcp`, `/.well-known/mcp.json`,
+   `/api/mcp`, `/v1/mcp`, …) and classify echoed responses for MCP protocol
+   signatures (JSON-RPC 2.0 shape, `jsonrpc` key, `initialize` method).
+
+Both modes use `--mcp-host` / `--mcp-port` to target a specific internal host
+(default: `127.0.0.1`).
+
+### Gopher protocol coverage
+
+The `gopher://` payload generator (`wraith gopher`) and the `--exploit` gate
+both use `wraith.protocols` byte encoders. Current implementation status:
+
+| Protocol | Status | Payload type | Notes |
+|---|---|---|---|
+| Redis (RESP) | Implemented | `gopher://` RESP multi-command frames | Supports any RESP command list via `--command`. Weaponized sequences in `--exploit`: cron-job injection, SSH authorized-keys injection. |
+| PHP-FPM FastCGI | Implemented | `gopher://` FCGI_BEGIN_REQUEST + FCGI_PARAMS + FCGI_STDIN | Encodes `SCRIPT_FILENAME` + `PHP_VALUE auto_prepend_file = php://input`. Weaponized sequence in `--exploit`: FastCGI RCE. |
+| MySQL | Deferred | `gopher://` MySQL client handshake | Pre-auth RCE for older MySQL versions. Deferred: requires verified client protocol byte structure and a container fixture. |
+| PostgreSQL | Deferred | `gopher://` FE/BE wire protocol | `COPY TO/FROM PROGRAM` for file read/write. Deferred: protocol byte structure and container fixture. |
+| Memcached | Deferred | `gopher://` text protocol | Cache poisoning or slot dump. Deferred: lower destructive surface than MySQL/Postgres, but needs the same gate discipline. |
+
+MySQL, PostgreSQL, and Memcached are deferred because each extends wraith's
+destructive surface and requires a protocol-specific opt-in flag beyond the
+existing `--exploit` gate, plus hermetic container test fixtures and a named
+confirmation that describes the specific side effect to the operator.
+
+### `--exploit` gate: safety model
+
+The `--exploit` flag is a double opt-in that separates detection from
+weaponization:
+
+**Without `--exploit`:**
+- `wraith scan` detects and confirms SSRF, runs cloud-metadata probes, and runs
+  the OOB confirmation engine. It never fires attack payloads.
+- `wraith gopher` generates a `gopher://` payload and prints it. It never sends
+  the payload to any target.
+- Harvested cloud credentials appear in findings as redacted fingerprints
+  (`matched signatures AccessKeyId, SecretAccessKey; body_len=N (secret values
+  redacted)`). The raw credential bytes are never stored, logged, or used.
+
+**With `--exploit` and `--yes` (skips interactive confirmation):**
+- `wraith exploit` sends the weaponized `gopher://` sequence to the target's
+  SSRF injection point (scope-enforced via `--scope-file`).
+- Three sequences are available: `redis-cron`, `redis-ssh`, `fastcgi-rce`.
+- The confirmation prompt is printed to stderr; answer `y`/`yes` or pass `--yes`
+  to skip it for scripted/CI use.
+- Credentials harvested during an exploit-mode scan are still never used for
+  SDK calls or cloud enumeration. The exploitation surface is bounded to the
+  three `gopher://` sequences.
+
+**What `--exploit` does NOT cover (deferred — see Roadmap):**
+- Cloud credential use (AWS boto3, GCP SDK, Azure SDK calls).
+- Redis `MODULE LOAD` RCE.
+- MySQL, PostgreSQL, Memcached protocol payloads.
+- Reverse shell / connect-back listener.
+
 ## Example output
 
 A confirmed cloud-metadata SSRF renders to HackerOne markdown (`--format h1md`)
@@ -409,6 +585,23 @@ pytest
 The unit tier runs with sockets disabled (via `pytest-socket`, when installed)
 so any accidental real egress fails loudly -- the enforcement baseline for the
 hermetic test tiers described in `V0.1-CRITERIA.md`.
+
+### Test tiers
+
+wraith's test suite is split into four tiers, ordered by cost and isolation:
+
+| Tier | Marker | Description |
+|---|---|---|
+| Tier-0 | (default) | Pure-function unit tests: exact-byte assertions on IP encodings, RESP / FastCGI payload structure, `gopher://` URL generation, finding serialization, SARIF shape. Zero I/O; run in milliseconds. |
+| Tier-1 | (default) | Mocked-HTTP tests using `respx` to intercept `httpx` transport. Covers cloud-metadata probe request shape (PUT/GET order, header presence/absence), OOB classifier, MCP signature matching. No socket opens. |
+| Tier-2 | (default) | Loopback-local fixture tests: in-process `dnslib` OOB listener + `pytest-httpserver` for the OOB confirmation round-trip. Sockets permitted to 127.0.0.1 / ::1 only. |
+| Tier-3 | `ship_gate` | Wheel ship-gate: builds the wheel in a subprocess, installs it into a fresh venv, and asserts the entry-point and `--version` output are correct. Excluded from the fast tier. |
+
+Run only Tier-0 and Tier-1 (the fast hermetic unit tests):
+
+```bash
+pytest -m "not ship_gate" -q
+```
 
 ## Roadmap
 
@@ -456,21 +649,93 @@ classifier checks `azure-managed-identity` before `gcp` to prevent token
 response misclassification (both return `access_token`; only Azure MI returns
 the disambiguating `resource` field).
 
-The following remain **deferred** post-v0.9:
+The following remain **deferred** post-v0.9. Each item records what it is, the
+safety rationale for deferral, and what must be true before it can land.
 
-- **Weaponized `gopher://` `MODULE LOAD`** &mdash; dynamically loaded Redis
-  modules for more capable post-exploitation.
-- **Using harvested cloud credentials** (SDK calls to enumerate/exfil)
-  &mdash; detection emits the finding; credential use is a separate dangerous
-  pivot.
-- **Reverse-shell / connect-back listener** &mdash; weaponization.
-- **Request-smuggling desync** to reach enforced IMDSv2 &mdash; that is
-  `doppelganger`'s surface.
-- **Self-hosted DNS-rebinding orchestration** &mdash; v0.1 may *emit* rebind
-  hostnames pointing at public rebind services; hosting the flip is deferred.
-- **Full CVE template library** &mdash; seed a handful, defer the catalog.
-- Extended protocol weaponization (MySQL/Postgres/Zabbix/Memcached), advanced
-  WAF-evasion beyond the core mutators, and GUI/proxy integration.
+### Deferred: Redis `MODULE LOAD` RCE
+
+A `MODULE LOAD <url>` sequence loads a compiled Redis module (`.so`) into the
+running Redis process, granting arbitrary code execution at Redis's OS
+privileges — a significantly more capable primitive than the cron/SSH-key
+payloads in `--exploit`. It is deferred because it requires a pre-staged
+malicious binary and has a wider blast radius; landing it without a carefully
+scoped separate opt-in would make wraith trivially weaponizable against
+unintended targets.
+
+**Prerequisites:** a module-staging helper or staging documentation; a
+`--module-load` gate distinct from `--exploit`; a mock test fixture against a
+Redis RESP stub.
+
+### Deferred: Harvested cloud-credential SDK use (enumerate and exfil)
+
+wraith's IMDS probes emit findings when they recover cloud credentials but
+never use them. This deferred item is the next step: use the harvested
+credential with the cloud provider's SDK (boto3, google-cloud, azure-identity)
+to enumerate accessible resources and optionally exfil selected data. Credential
+use is a privilege-escalation step beyond detection; it may trigger cloud-provider
+alerting and requires explicit operator authorization beyond what the scope file
+provides.
+
+**Prerequisites:** an `--use-creds` gate with a mandatory confirmation step;
+optional credential dump to a structured output file; SDK extras kept optional;
+a sandboxed test against localstack or azure-emulator.
+
+### Deferred: Reverse-shell / connect-back listener
+
+A reverse shell gives the operator interactive OS access on the target —
+weaponization at the highest severity. This must live behind a separate
+subcommand (e.g. `wraith shell`) fully decoupled from `wraith scan`, with a
+mandatory out-of-band authorization token beyond the scope file, and audit
+logging before it can land.
+
+**Prerequisites:** a separate `wraith shell` subcommand; a mandatory
+authorization token distinct from the scope file; a loopback-only CI fixture;
+a mature audit-log feature.
+
+### Deferred: Extended `gopher://` protocol weaponization
+
+Gopherus (the reference) covers Redis, PHP-FPM FastCGI, MySQL, PostgreSQL,
+Zabbix, and Memcached. wraith v0.2 ships Redis and FastCGI; the remaining
+protocols are deferred:
+
+- **MySQL** — authentication bypass via pre-auth RCE for older versions;
+  gopher payload encodes the MySQL client protocol handshake.
+- **PostgreSQL** — `COPY TO/FROM PROGRAM` for file read/write; gopher payload
+  encodes the PostgreSQL FE/BE wire protocol.
+- **Memcached** — cache poisoning or slot dump; gopher payload encodes the
+  Memcached text protocol.
+
+Each additional protocol extends the destructive surface and must be behind a
+protocol-specific opt-in flag (e.g. `--exploit-mysql`) in addition to the
+existing `--exploit` gate, with a named confirmation step describing the
+specific action and its side effects.
+
+**Prerequisites:** verified gopher payload encodings for each protocol
+(reference Gopherus for byte structure); hermetic container test fixtures (a
+local MySQL/Postgres/Memcached instance in the Tier-3 docker test suite).
+
+### Deferred: Request-smuggling desync to reach enforced IMDSv2
+
+AWS IMDSv2 enforcement can potentially be bypassed via HTTP request-smuggling
+desync. This surface overlaps substantially with `doppelganger` (the
+necromancer suite tool that owns request-smuggling as its core niche). This
+item should not land until `doppelganger` stabilises its smuggling primitives;
+wraith would call `doppelganger` as a library rather than re-implement.
+
+### Deferred: Self-hosted DNS-rebinding orchestration
+
+wraith emits `rbndr.us` rebind hostnames (emit-only). Hosting the DNS flip
+locally eliminates third-party dependency and allows precise rebind timing, but
+requires outbound DNS authority, rate-limiting against open-resolver abuse, and
+documentation for operator-controlled domain registration.
+
+### Deferred: Full CVE template library and advanced WAF evasion
+
+The v0.1 MCP catalog seeds a handful of curated CVE signatures. Extending this
+to a maintained multi-framework CVE library (Ivanti, GitLab Runner, Spring Boot
+Actuator, Next.js, Grafana renderer) and adding WAF fingerprinting + per-vendor
+advanced bypass catalog are deferred until a template schema (YAML/TOML with
+version gates) and a `wraith update-templates` mechanism are designed.
 
 ## License
 
